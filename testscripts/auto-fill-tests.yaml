@@ -1,0 +1,12 @@
+group: auto-fill mode
+setup: |
+  Enable auto-fill-mode in a text-mode buffer.
+  Set fill-column to 40.
+tests:
+  - description: |
+      Type a long paragraph that exceeds fill-column.
+      Verify that the text is automatically wrapped at or before column 40.
+  - description: |
+      Type a numbered list item (starting with "1. ") that exceeds fill-column.
+      Verify that continuation lines are indented to align with the text
+      after the list marker.

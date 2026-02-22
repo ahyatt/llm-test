@@ -1,0 +1,54 @@
+#+TITLE: llm-test: LLM-Driven Testing for Emacs
+#+AUTHOR: Andrew Hyatt
+
+* Overview
+
+~llm-test~ is an Emacs library that uses LLM agents to interpret natural-language
+test specifications and execute them against a fresh Emacs process.  Tests are
+written in YAML and registered as ERT tests, integrating with the standard Emacs
+test infrastructure.
+
+* How It Works
+
+1. You write test specs in YAML files describing what to test in plain English.
+2. ~llm-test~ parses these YAML files and registers an ERT test for each spec.
+3. When a test runs, a fresh Emacs process (~emacs -Q~) is launched.
+4. An LLM agent interprets the test description, drives the fresh Emacs via
+   tool calls (eval elisp, send keys, inspect buffers, etc.), and determines
+   whether the test passes or fails.
+
+* YAML Test Format
+
+#+begin_src yaml
+group: auto-fill mode
+setup: |
+  Enable auto-fill-mode in a text-mode buffer.
+  Set fill-column to 40.
+tests:
+  - description: |
+      Type a long paragraph that exceeds fill-column.
+      Verify that the text is automatically wrapped.
+  - description: |
+      Type a numbered list item that exceeds fill-column.
+      Verify that continuation lines are indented properly.
+#+end_src
+
+* Installation
+
+This package requires the [[https://github.com/ahyatt/llm][llm]] package and [[https://github.com/zkry/yaml.el][yaml.el]].
+
+* Usage
+
+#+begin_src emacs-lisp
+(require 'llm-test)
+(require 'llm-openai)  ; or another provider
+
+(setq llm-test-provider (make-llm-openai :key "your-key"))
+(llm-test-load-tests "path/to/testscripts/")
+
+;; Then run with M-x ert or (ert-run-tests-batch)
+#+end_src
+
+* Status
+
+This project is in early development.

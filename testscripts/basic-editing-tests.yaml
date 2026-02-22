@@ -1,0 +1,10 @@
+group: basic editing
+setup: |
+  Open a new buffer called "test-buffer" in text-mode.
+tests:
+  - description: |
+      Insert the text "Hello, world!" into the buffer.
+      Verify the buffer contains exactly "Hello, world!".
+  - description: |
+      Insert some text, then call undo.
+      Verify the buffer is empty after undoing.
