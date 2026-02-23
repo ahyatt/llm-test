@@ -31,7 +31,7 @@
 ;; Usage:
 ;;   (require 'llm-test)
 ;;   (setq llm-test-provider (make-llm-openai :key "..."))
-;;   (llm-test-load-tests "path/to/testscripts/")
+;;   (llm-test-register-tests "path/to/testscripts/")
 
 ;;; Code:
 
@@ -110,20 +110,29 @@ The YAML should contain a single group document with keys:
 (defvar llm-test--server-name-counter 0
   "Counter for generating unique server names.")
 
-(defun llm-test--start-emacs ()
+(cl-defun llm-test--start-emacs (&key load-path init-forms)
   "Start a fresh Emacs process for testing.
-Returns a plist with :process, :server-name, and :socket-dir."
+LOAD-PATH is a list of directories to add to the subprocess `load-path'.
+INIT-FORMS is a list of elisp forms to evaluate at startup.
+Returns a plist with :process, :server-name, :socket-dir, and :init-file."
   (let* ((server-name (format "llm-test-%d-%d"
                               (emacs-pid)
                               (cl-incf llm-test--server-name-counter)))
          (socket-dir (make-temp-file "llm-test-socket-" t))
+         (init-file (make-temp-file "llm-test-init-" nil ".el"))
+         (_ (with-temp-file init-file
+              (insert (format "(setq server-socket-dir %S server-name %S)\n"
+                              socket-dir server-name))
+              (dolist (dir load-path)
+                (insert (format "(add-to-list 'load-path %S)\n" dir)))
+              (dolist (form init-forms)
+                (insert (format "%S\n" form)))))
          (process (start-process
                    (format "llm-test-emacs-%s" server-name)
                    (format " *llm-test-emacs-%s*" server-name)
                    llm-test-emacs-executable
                    "-Q"
-                   "--eval" (format "(setq server-socket-dir %S server-name %S)"
-                                    socket-dir server-name)
+                   "-l" init-file
                    (format "--daemon=%s" server-name))))
     ;; Wait for the daemon to be ready by polling for the socket file.
     (let ((deadline (+ (float-time) llm-test-timeout))
@@ -137,7 +146,8 @@ Returns a plist with :process, :server-name, and :socket-dir."
         (error "Timed out waiting for test Emacs daemon to start")))
     (list :process process
           :server-name server-name
-          :socket-dir socket-dir)))
+          :socket-dir socket-dir
+          :init-file init-file)))
 
 (defun llm-test--eval-in-emacs (emacs-info sexp)
   "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
@@ -160,6 +170,7 @@ Returns the result as a string."
   "Stop the test Emacs process described by EMACS-INFO."
   (let* ((server-name (plist-get emacs-info :server-name))
          (socket-dir (plist-get emacs-info :socket-dir))
+         (init-file (plist-get emacs-info :init-file))
          (process (plist-get emacs-info :process)))
     (ignore-errors
       (call-process "emacsclient" nil nil nil
@@ -169,7 +180,10 @@ Returns the result as a string."
     (when (process-live-p process)
       (delete-process process))
     (ignore-errors
-      (delete-directory socket-dir t))))
+      (delete-directory socket-dir t))
+    (when init-file
+      (ignore-errors
+        (delete-file init-file)))))
 
 ;;; Agent Tools and Loop
 
@@ -314,9 +328,11 @@ Returns a list of `llm-test-group' structs."
                        (directory-files directory t "\\.yml\\'"))))
     (mapcar #'llm-test--parse-yaml-file files)))
 
-(defun llm-test-register-tests (directory &optional provider)
+(cl-defun llm-test-register-tests (directory &key provider load-path init-forms)
   "Load YAML test specs from DIRECTORY and register them as ERT tests.
-PROVIDER is the LLM provider to use; defaults to `llm-test-provider'."
+PROVIDER is the LLM provider to use; defaults to `llm-test-provider'.
+LOAD-PATH is a list of directories to add to the test subprocess `load-path'.
+INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
   (let ((groups (llm-test-load-directory directory))
         (provider (or provider llm-test-provider)))
     (dolist (group groups)
@@ -328,7 +344,9 @@ PROVIDER is the LLM provider to use; defaults to `llm-test-provider'."
                  for description = (llm-test-spec-description test)
                  do (let ((the-test test)
                           (the-setup setup)
-                          (the-provider provider))
+                          (the-provider provider)
+                          (the-load-path load-path)
+                          (the-init-forms init-forms))
                       (ert-set-test
                        test-name
                        (make-ert-test
@@ -337,7 +355,9 @@ PROVIDER is the LLM provider to use; defaults to `llm-test-provider'."
                                                (llm-test-group-name group)
                                                idx description)
                         :body (lambda ()
-                                (let ((emacs-info (llm-test--start-emacs)))
+                                (let ((emacs-info (llm-test--start-emacs
+                                                   :load-path the-load-path
+                                                   :init-forms the-init-forms)))
                                   (unwind-protect
                                       (let ((result (llm-test--run-test
                                                      the-provider emacs-info

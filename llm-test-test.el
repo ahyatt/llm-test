@@ -66,7 +66,7 @@
   (let ((dir (expand-file-name "testscripts"
                                (file-name-directory (locate-library "llm-test")))))
     ;; Use a dummy provider - we won't actually run the tests
-    (llm-test-register-tests dir 'dummy-provider)
+    (llm-test-register-tests dir :provider 'dummy-provider)
     (should (ert-test-boundp 'llm-test/auto-fill-mode/1))
     (should (ert-test-boundp 'llm-test/auto-fill-mode/2))
     (should (ert-test-boundp 'llm-test/basic-editing/1))

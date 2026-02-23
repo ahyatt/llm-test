@@ -44,10 +44,26 @@ This package requires the [[https://github.com/ahyatt/llm][llm]] package and [[h
 (require 'llm-openai)  ; or another provider
 
 (setq llm-test-provider (make-llm-openai :key "your-key"))
-(llm-test-load-tests "path/to/testscripts/")
+(llm-test-register-tests "path/to/testscripts/")
 
 ;; Then run with M-x ert or (ert-run-tests-batch)
 #+end_src
+
+* Testing Your Own Package
+
+When testing a package that isn't installed system-wide, pass ~:load-path~ to
+make it available in the test Emacs subprocess, and ~:init-forms~ for any
+startup code (e.g., requiring packages, configuring variables):
+
+#+begin_src emacs-lisp
+(llm-test-register-tests "path/to/testscripts/"
+  :load-path '("/path/to/my-package" "/path/to/its/dependencies")
+  :init-forms '((require 'my-package)
+                (setq my-variable "value")))
+#+end_src
+
+The load-path entries are added and init-forms are evaluated when each test
+Emacs subprocess starts, before any test setup or execution.
 
 * Status
 
