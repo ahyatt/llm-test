@@ -281,11 +281,46 @@ via fail-test.
   "The result of running a single test."
   passed-p reason)
 
+(defun llm-test--run-test-async (provider prompt iteration callback)
+  "Run one async iteration of the agent loop.
+PROVIDER is the LLM provider.  PROMPT is the chat prompt with tools.
+ITERATION is the current iteration count.  CALLBACK is called with
+an `llm-test-result' when the agent reaches a verdict or hits the
+iteration limit."
+  (if (> iteration llm-test-max-iterations)
+      (funcall callback
+               (make-llm-test-result
+                :passed-p nil
+                :reason (format "Agent did not reach a verdict after %d iterations"
+                                llm-test-max-iterations)))
+    (llm-chat-async
+     provider prompt
+     (lambda (result)
+       (let* ((tool-results (plist-get result :tool-results))
+              (pass-result (assoc-default "pass-test" tool-results))
+              (fail-result (assoc-default "fail-test" tool-results)))
+         (cond
+          (pass-result
+           (funcall callback
+                    (make-llm-test-result :passed-p t :reason pass-result)))
+          (fail-result
+           (funcall callback
+                    (make-llm-test-result :passed-p nil :reason fail-result)))
+          (t
+           (llm-test--run-test-async provider prompt (1+ iteration) callback)))))
+     (lambda (_ err)
+       (funcall callback
+                (make-llm-test-result
+                 :passed-p nil
+                 :reason (format "LLM error: %s" err))))
+     t)))
+
 (defun llm-test--run-test (provider emacs-info group-setup test-spec)
   "Run a single test using PROVIDER against EMACS-INFO.
 GROUP-SETUP is the setup string for the test group.
 TEST-SPEC is an `llm-test-spec' struct.
-Returns an `llm-test-result'."
+Returns an `llm-test-result'.  Processes async events while waiting
+so that Emacs remains responsive."
   (let* ((user-message
           (format "Setup instructions:\n%s\n\nTest to execute:\n%s"
                   group-setup
@@ -294,21 +329,17 @@ Returns an `llm-test-result'."
          (prompt (llm-make-chat-prompt
                   user-message
                   :context llm-test--system-prompt
-                  :tools tools)))
-    (cl-loop for iteration from 1 to llm-test-max-iterations
-             for result = (llm-chat provider prompt t)
-             for tool-results = (plist-get result :tool-results)
-             for pass-result = (assoc-default "pass-test" tool-results)
-             for fail-result = (assoc-default "fail-test" tool-results)
-             if pass-result
-             return (make-llm-test-result :passed-p t :reason pass-result)
-             if fail-result
-             return (make-llm-test-result :passed-p nil :reason fail-result)
-             finally return
-             (make-llm-test-result
-              :passed-p nil
-              :reason (format "Agent did not reach a verdict after %d iterations"
-                              llm-test-max-iterations)))))
+                  :tools tools))
+         (done nil)
+         (final-result nil))
+    (llm-test--run-test-async
+     provider prompt 1
+     (lambda (result)
+       (setq final-result result
+             done t)))
+    (while (not done)
+      (accept-process-output nil 0.1))
+    final-result))
 
 ;;; Test Loading
 
