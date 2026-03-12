@@ -276,7 +276,13 @@ scroll-down-command / scroll-up-command via send-keys to see more content."
     :description "Send a key sequence to the test Emacs, as if typed by a user.
 Use Emacs key notation (e.g. \"C-x C-f\", \"M-x\", \"RET\").
 You can use this to scroll (e.g. \"C-v\" for scroll-up, \"M-v\" for
-scroll-down) and then call get-buffer-contents to see the new viewport."
+scroll-down) and then call get-buffer-contents to see the new viewport.
+
+IMPORTANT: If a key triggers a command that prompts for input (like
+completing-read or read-string), you MUST include the response and RET
+in the SAME key sequence.  For example, if pressing \"t\" opens a
+prompt for a state, send \"t D O N E RET\" as a single call.  Sending
+\"t\" alone would hang because the prompt blocks waiting for input."
     :args (list (list :name "keys" :type 'string
                       :description "Key sequence in Emacs notation.")))
 
@@ -328,6 +334,10 @@ Important rules:
 human looking at the screen).  To see more content, use send-keys to scroll \
 (e.g. \"C-v\" to scroll down, \"M-v\" to scroll up) and then call \
 get-buffer-contents again.
+- When a key triggers a command that prompts for input (e.g. a completing-read \
+or read-string), include the full response and RET in the SAME send-keys call.  \
+For example: send-keys \"t D O N E RET\" to press t, type DONE, and confirm.  \
+Sending just \"t\" would hang because the prompt blocks waiting for input.
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
 - Be thorough: verify the actual state, don't assume operations succeeded.
