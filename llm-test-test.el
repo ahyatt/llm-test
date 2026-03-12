@@ -50,7 +50,7 @@
   (let ((dir (expand-file-name "testscripts"
                                (file-name-directory (locate-library "llm-test")))))
     (let ((groups (llm-test-load-directory dir)))
-      (should (>= (length groups) 2)))))
+      (should (>= (length groups) 3)))))
 
 ;;; Slugify tests
 
@@ -70,7 +70,8 @@
     (should (ert-test-boundp 'llm-test/auto-fill-mode/1))
     (should (ert-test-boundp 'llm-test/auto-fill-mode/2))
     (should (ert-test-boundp 'llm-test/basic-editing/1))
-    (should (ert-test-boundp 'llm-test/basic-editing/2))))
+    (should (ert-test-boundp 'llm-test/basic-editing/2))
+    (should (ert-test-boundp 'llm-test/visual-line-mode/1))))
 
 ;;; Subprocess control tests
 
@@ -129,14 +130,61 @@
 (ert-deftest llm-test-suggestions-accumulate ()
   "The suggest-improvement tool should accumulate suggestions."
   (let* ((suggestions (list nil))
-         (tool (nth 4 (llm-test--make-tools
+         (tool (nth 5 (llm-test--make-tools
                        '(:server-name "x" :socket-dir "/tmp")
                        suggestions))))
-    ;; The suggest-improvement tool is at index 4.
+    ;; The suggest-improvement tool is at index 5.
     (should (equal (llm-tool-name tool) "suggest-improvement"))
     (funcall (llm-tool-function tool) "suggestion one")
     (funcall (llm-tool-function tool) "suggestion two")
     (should (equal (cdr suggestions) '("suggestion one" "suggestion two")))))
+
+(ert-deftest llm-test-send-keys-nonblocking ()
+  "send-keys via unread-command-events should handle prompting commands."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          ;; Set up a buffer with a command that calls completing-read.
+          (llm-test--eval-in-emacs
+           info
+           "(progn
+              (switch-to-buffer \"test-nb\")
+              (local-set-key (kbd \"q\")
+                (lambda () (interactive)
+                  (insert (completing-read \"Pick: \" '(\"alpha\" \"beta\"))))))")
+          ;; Queue "q" via unread-command-events — returns immediately.
+          (let ((result (llm-test--eval-in-emacs
+                         info
+                         "(progn
+                            (setq unread-command-events
+                                  (append unread-command-events
+                                          (listify-key-sequence (kbd \"q\"))))
+                            \"keys queued\")")))
+            (should (equal result "\"keys queued\""))
+            ;; The daemon command loop processes "q", entering completing-read.
+            (sleep-for 1.0)
+            ;; The minibuffer should now be active with the prompt.
+            (let ((mb (llm-test--eval-in-emacs
+                       info
+                       "(if (active-minibuffer-window)
+                            \"minibuffer-active\"
+                          \"no-minibuffer\")")))
+              (should (equal mb "\"minibuffer-active\"")))
+            ;; Feed the response into the active prompt.
+            (llm-test--eval-in-emacs
+             info
+             "(setq unread-command-events
+                    (append unread-command-events
+                            (listify-key-sequence (kbd \"a l p h a RET\"))))")
+            ;; Wait for completing-read to consume the events.
+            (sleep-for 1.0)
+            ;; The buffer should now contain "alpha".
+            (let ((contents (llm-test--eval-in-emacs
+                             info
+                             "(with-current-buffer \"test-nb\"
+                                (buffer-string))")))
+              (should (equal contents "\"alpha\"")))))
+      (llm-test--stop-emacs info))))
 
 (ert-deftest llm-test-report-result-pass ()
   "A passing result with no suggestions should not signal."

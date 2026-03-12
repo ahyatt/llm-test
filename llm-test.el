@@ -270,21 +270,50 @@ scroll-down-command / scroll-up-command via send-keys to see more content."
                 (condition-case err
                     (llm-test--eval-in-emacs
                      emacs-info
-                     (format "(execute-kbd-macro (kbd %S))" keys))
+                     (format
+                      "(progn
+                         (setq unread-command-events
+                               (append unread-command-events
+                                       (listify-key-sequence (kbd %S))))
+                         (format \"Keys queued (%%s pending)\"
+                                 (length unread-command-events)))"
+                      keys))
                   (error (format "ERROR: %s" (error-message-string err)))))
     :name "send-keys"
     :description "Send a key sequence to the test Emacs, as if typed by a user.
 Use Emacs key notation (e.g. \"C-x C-f\", \"M-x\", \"RET\").
-You can use this to scroll (e.g. \"C-v\" for scroll-up, \"M-v\" for
-scroll-down) and then call get-buffer-contents to see the new viewport.
 
-IMPORTANT: If a key triggers a command that prompts for input (like
-completing-read or read-string), you MUST include the response and RET
-in the SAME key sequence.  For example, if pressing \"t\" opens a
-prompt for a state, send \"t D O N E RET\" as a single call.  Sending
-\"t\" alone would hang because the prompt blocks waiting for input."
+This is non-blocking: it queues the keys and returns immediately.
+The keys are processed by the Emacs command loop after this call
+returns.  After calling send-keys, use get-buffer-contents or
+get-minibuffer-contents to observe the effect.
+
+If a key triggers a command that prompts for input (completing-read,
+read-string, etc.), the minibuffer becomes active.  Use
+get-minibuffer-contents to see the prompt, then call send-keys again
+with the response (e.g. \"D O N E RET\").  The keys are fed directly
+into the active prompt."
     :args (list (list :name "keys" :type 'string
                       :description "Key sequence in Emacs notation.")))
+
+   (make-llm-tool
+    :function (lambda ()
+                (condition-case err
+                    (llm-test--eval-in-emacs
+                     emacs-info
+                     "(if (active-minibuffer-window)
+                          (with-current-buffer (window-buffer (active-minibuffer-window))
+                            (format \"Prompt: %s\\nInput so far: %s\"
+                                    (or (minibuffer-prompt) \"\")
+                                    (minibuffer-contents-no-properties)))
+                        \"No active minibuffer\")")
+                  (error (format "ERROR: %s" (error-message-string err)))))
+    :name "get-minibuffer-contents"
+    :description "Check whether a minibuffer prompt is active and return its contents.
+Returns the prompt text and any input typed so far, or a message
+indicating no minibuffer is active.  Use this after send-keys to see
+if a command opened a prompt that needs a response."
+    :args nil)
 
    (make-llm-tool
     :function (lambda (suggestion)
@@ -330,14 +359,18 @@ Important rules:
 - Always call exactly one of pass-test or fail-test before finishing.
 - Use eval-elisp for programmatic operations and state inspection.
 - Use send-keys when the test requires simulating interactive user input.
+- send-keys is non-blocking: it schedules the keys and returns immediately.  \
+After calling send-keys, call get-buffer-contents or get-minibuffer-contents \
+to observe the effect.
 - get-buffer-contents returns only what is visible in the window (like a \
 human looking at the screen).  To see more content, use send-keys to scroll \
 (e.g. \"C-v\" to scroll down, \"M-v\" to scroll up) and then call \
 get-buffer-contents again.
-- When a key triggers a command that prompts for input (e.g. a completing-read \
-or read-string), include the full response and RET in the SAME send-keys call.  \
-For example: send-keys \"t D O N E RET\" to press t, type DONE, and confirm.  \
-Sending just \"t\" would hang because the prompt blocks waiting for input.
+- When a key triggers a command that prompts for input (completing-read, \
+read-string, etc.), the minibuffer becomes active.  Call \
+get-minibuffer-contents to see the prompt, then call send-keys with the \
+response (e.g. \"D O N E RET\").  The keys are fed directly into the active \
+prompt.
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
 - Be thorough: verify the actual state, don't assume operations succeeded.

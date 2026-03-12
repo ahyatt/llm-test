@@ -1,0 +1,22 @@
+group: visual-line-mode
+setup: |
+  Evaluate the following to create a buffer with visual-line-mode:
+
+    (progn
+      (switch-to-buffer "test-wrap")
+      (visual-line-mode 1))
+
+  The frame is 80 columns wide, 40 lines tall.
+  The buffer "test-wrap" has visual-line-mode enabled, which means
+  long lines wrap visually at the window edge without inserting
+  actual newline characters.
+
+tests:
+  - description: |
+      Type a sentence that is much longer than 80 characters into
+      the buffer using send-keys (just type the characters directly).
+      Then use get-buffer-contents to see the visible display.
+      Verify that:
+        1. The text appears on more than one display line (it wraps).
+        2. The buffer contains no actual newline characters — confirm
+           with eval-elisp by checking (count-lines (point-min) (point-max)).
