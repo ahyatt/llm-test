@@ -57,6 +57,21 @@ from the `llm' package."
   :type 'sexp
   :group 'llm-test)
 
+(defcustom llm-test-frame-width 80
+  "Width in columns of the frame created in the test Emacs process."
+  :type 'integer
+  :group 'llm-test)
+
+(defcustom llm-test-frame-height 40
+  "Height in lines of the frame created in the test Emacs process."
+  :type 'integer
+  :group 'llm-test)
+
+(defcustom llm-test-warnings-as-errors nil
+  "When non-nil, any improvement suggestions cause the test to fail."
+  :type 'boolean
+  :group 'llm-test)
+
 ;;; Data Structures
 
 (cl-defstruct llm-test-spec
@@ -144,10 +159,17 @@ Returns a plist with :process, :server-name, :socket-dir, and :init-file."
         (when (process-live-p process)
           (kill-process process))
         (error "Timed out waiting for test Emacs daemon to start")))
-    (list :process process
-          :server-name server-name
-          :socket-dir socket-dir
-          :init-file init-file)))
+    ;; Set the frame dimensions so that window-based visibility queries
+    ;; return meaningful results in the daemon.
+    (let ((frame-info (list :process process
+                            :server-name server-name
+                            :socket-dir socket-dir
+                            :init-file init-file)))
+      (llm-test--eval-in-emacs
+       frame-info
+       (format "(set-frame-size (selected-frame) %d %d)"
+               llm-test-frame-width llm-test-frame-height))
+      frame-info)))
 
 (defun llm-test--eval-in-emacs (emacs-info sexp)
   "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
@@ -192,9 +214,11 @@ Returns the result as a string."
   :type 'integer
   :group 'llm-test)
 
-(defun llm-test--make-tools (emacs-info)
+(defun llm-test--make-tools (emacs-info suggestions)
   "Create the list of `llm-tool' structs for the test agent.
-EMACS-INFO is the plist from `llm-test--start-emacs'."
+EMACS-INFO is the plist from `llm-test--start-emacs'.
+SUGGESTIONS is a list (mutated by reference) that accumulates
+improvement suggestions from the agent."
   (list
    (make-llm-tool
     :function (lambda (code)
@@ -211,11 +235,22 @@ EMACS-INFO is the plist from `llm-test--start-emacs'."
                 (condition-case err
                     (llm-test--eval-in-emacs
                      emacs-info
-                     (format "(with-current-buffer %S (buffer-substring-no-properties (point-min) (point-max)))"
-                             buffer-name))
+                     (format "(progn
+                                (let ((w (get-buffer-window %S t)))
+                                  (unless w
+                                    (set-window-buffer (selected-window) %S)
+                                    (setq w (selected-window)))
+                                  (redisplay t)
+                                  (with-current-buffer %S
+                                    (buffer-substring-no-properties
+                                     (window-start w)
+                                     (window-end w t)))))"
+                             buffer-name buffer-name buffer-name))
                   (error (format "ERROR: %s" (error-message-string err)))))
     :name "get-buffer-contents"
-    :description "Get the full text content of a named buffer in the test Emacs."
+    :description "Get the text currently visible in the window displaying a buffer.
+This returns only what would be on screen, not the full buffer.  Use
+scroll-down-command / scroll-up-command via send-keys to see more content."
     :args (list (list :name "buffer_name" :type 'string
                       :description "The name of the buffer to read.")))
 
@@ -238,9 +273,25 @@ EMACS-INFO is the plist from `llm-test--start-emacs'."
                      (format "(execute-kbd-macro (kbd %S))" keys))
                   (error (format "ERROR: %s" (error-message-string err)))))
     :name "send-keys"
-    :description "Send a key sequence to the test Emacs, as if typed by a user.  Use Emacs key notation (e.g. \"C-x C-f\", \"M-x\", \"RET\")."
+    :description "Send a key sequence to the test Emacs, as if typed by a user.
+Use Emacs key notation (e.g. \"C-x C-f\", \"M-x\", \"RET\").
+You can use this to scroll (e.g. \"C-v\" for scroll-up, \"M-v\" for
+scroll-down) and then call get-buffer-contents to see the new viewport."
     :args (list (list :name "keys" :type 'string
                       :description "Key sequence in Emacs notation.")))
+
+   (make-llm-tool
+    :function (lambda (suggestion)
+                (nconc suggestions (list suggestion))
+                (format "Suggestion recorded: %s" suggestion))
+    :name "suggest-improvement"
+    :description "Record a suggestion for improving the UI or behavior of the
+package under test.  This does NOT affect the pass/fail verdict — call it
+whenever you notice something that could be better (confusing labels,
+missing feedback, awkward key bindings, poor layout, etc.).  You may call
+this zero or more times during a test."
+    :args (list (list :name "suggestion" :type 'string
+                      :description "A description of the improvement you suggest.")))
 
    (make-llm-tool
     :function (lambda (reason) (format "PASS: %s" reason))
@@ -265,26 +316,35 @@ Your workflow:
 1. Read the setup instructions and execute them using eval-elisp or send-keys.
 2. Read the test description and perform the actions described.
 3. After performing the actions, verify the expected outcome by inspecting \
-buffer contents, evaluating elisp expressions, etc.
-4. Call pass-test if the outcome matches expectations, or fail-test if it does not.
+the visible buffer contents, evaluating elisp expressions, etc.
+4. Call pass-test if the outcome matches expectations, or fail-test if it \
+does not.
 
 Important rules:
 - Always call exactly one of pass-test or fail-test before finishing.
 - Use eval-elisp for programmatic operations and state inspection.
 - Use send-keys when the test requires simulating interactive user input.
+- get-buffer-contents returns only what is visible in the window (like a \
+human looking at the screen).  To see more content, use send-keys to scroll \
+(e.g. \"C-v\" to scroll down, \"M-v\" to scroll up) and then call \
+get-buffer-contents again.
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
-- Be thorough: verify the actual state, don't assume operations succeeded."
+- Be thorough: verify the actual state, don't assume operations succeeded.
+- If you notice anything about the UI or behavior that could be improved \
+(confusing text, poor layout, missing feedback, awkward workflow), call \
+suggest-improvement to record it.  This is independent of pass/fail."
   "System prompt for the LLM test agent.")
 
 (cl-defstruct llm-test-result
   "The result of running a single test."
-  passed-p reason)
+  passed-p reason suggestions)
 
-(defun llm-test--run-test-async (provider prompt iteration callback)
+(defun llm-test--run-test-async (provider prompt iteration suggestions callback)
   "Run one async iteration of the agent loop.
 PROVIDER is the LLM provider.  PROMPT is the chat prompt with tools.
-ITERATION is the current iteration count.  CALLBACK is called with
+ITERATION is the current iteration count.  SUGGESTIONS is the shared
+list accumulating improvement suggestions.  CALLBACK is called with
 an `llm-test-result' when the agent reaches a verdict or hits the
 iteration limit."
   (if (> iteration llm-test-max-iterations)
@@ -292,7 +352,8 @@ iteration limit."
                (make-llm-test-result
                 :passed-p nil
                 :reason (format "Agent did not reach a verdict after %d iterations"
-                                llm-test-max-iterations)))
+                                llm-test-max-iterations)
+                :suggestions (cdr suggestions)))
     (llm-chat-async
      provider prompt
      (lambda (result)
@@ -302,17 +363,21 @@ iteration limit."
          (cond
           (pass-result
            (funcall callback
-                    (make-llm-test-result :passed-p t :reason pass-result)))
+                    (make-llm-test-result :passed-p t :reason pass-result
+                                          :suggestions (cdr suggestions))))
           (fail-result
            (funcall callback
-                    (make-llm-test-result :passed-p nil :reason fail-result)))
+                    (make-llm-test-result :passed-p nil :reason fail-result
+                                          :suggestions (cdr suggestions))))
           (t
-           (llm-test--run-test-async provider prompt (1+ iteration) callback)))))
+           (llm-test--run-test-async provider prompt (1+ iteration)
+                                     suggestions callback)))))
      (lambda (_ err)
        (funcall callback
                 (make-llm-test-result
                  :passed-p nil
-                 :reason (format "LLM error: %s" err))))
+                 :reason (format "LLM error: %s" err)
+                 :suggestions (cdr suggestions))))
      t)))
 
 (defun llm-test--run-test (provider emacs-info group-setup test-spec)
@@ -325,7 +390,8 @@ so that Emacs remains responsive."
           (format "Setup instructions:\n%s\n\nTest to execute:\n%s"
                   group-setup
                   (llm-test-spec-description test-spec)))
-         (tools (llm-test--make-tools emacs-info))
+         (suggestions (list nil))
+         (tools (llm-test--make-tools emacs-info suggestions))
          (prompt (llm-make-chat-prompt
                   user-message
                   :context llm-test--system-prompt
@@ -333,7 +399,7 @@ so that Emacs remains responsive."
          (done nil)
          (final-result nil))
     (llm-test--run-test-async
-     provider prompt 1
+     provider prompt 1 suggestions
      (lambda (result)
        (setq final-result result
              done t)))
@@ -393,10 +459,26 @@ INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
                                       (let ((result (llm-test--run-test
                                                      the-provider emacs-info
                                                      the-setup the-test)))
-                                        (unless (llm-test-result-passed-p result)
-                                          (ert-fail
-                                           (llm-test-result-reason result))))
+                                        (llm-test--report-result result))
                                     (llm-test--stop-emacs emacs-info))))))))))))
+
+(defun llm-test--report-result (result)
+  "Report RESULT as an ERT pass or failure.
+When `llm-test-warnings-as-errors' is non-nil, any suggestions
+cause a failure even if the test passed."
+  (let ((suggestions (llm-test-result-suggestions result)))
+    (when suggestions
+      (message "llm-test suggestions:\n%s"
+               (mapconcat (lambda (s) (format "  - %s" s))
+                          suggestions "\n")))
+    (cond
+     ((not (llm-test-result-passed-p result))
+      (ert-fail (llm-test-result-reason result)))
+     ((and llm-test-warnings-as-errors suggestions)
+      (ert-fail
+       (format "Test passed but had suggestions (warnings-as-errors):\n%s"
+               (mapconcat (lambda (s) (format "  - %s" s))
+                          suggestions "\n")))))))
 
 (provide 'llm-test)
 ;;; llm-test.el ends here

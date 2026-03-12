@@ -91,5 +91,80 @@
         (should (equal (llm-test--eval-in-emacs info "user-init-file") "nil"))
       (llm-test--stop-emacs info))))
 
+(ert-deftest llm-test-visible-buffer-contents ()
+  "The get-buffer-contents tool should return only visible window content."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          ;; Insert 100 lines into a buffer — more than the 40-line frame.
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-visible*\")"
+                   "  (dotimes (i 100)"
+                   "    (insert (format \"line %d\\n\" i)))"
+                   "  (goto-char (point-min)))"))
+          ;; The total buffer has 100 lines, but the window shows ~40.
+          (let ((total-lines
+                 (string-to-number
+                  (llm-test--eval-in-emacs
+                   info
+                   "(with-current-buffer \"*test-visible*\" (count-lines (point-min) (point-max)))")))
+                (visible
+                 (llm-test--eval-in-emacs
+                  info
+                  (concat "(progn"
+                          "  (redisplay t)"
+                          "  (let ((w (get-buffer-window \"*test-visible*\" t)))"
+                          "    (with-current-buffer \"*test-visible*\""
+                          "      (buffer-substring-no-properties"
+                          "        (window-start w) (window-end w t)))))"))))
+            (should (= total-lines 100))
+            ;; Visible content should be a subset of the buffer.
+            (let ((visible-lines (length (split-string visible "\n" t))))
+              (should (< visible-lines 100))
+              (should (> visible-lines 0)))))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-suggestions-accumulate ()
+  "The suggest-improvement tool should accumulate suggestions."
+  (let* ((suggestions (list nil))
+         (tool (nth 4 (llm-test--make-tools
+                       '(:server-name "x" :socket-dir "/tmp")
+                       suggestions))))
+    ;; The suggest-improvement tool is at index 4.
+    (should (equal (llm-tool-name tool) "suggest-improvement"))
+    (funcall (llm-tool-function tool) "suggestion one")
+    (funcall (llm-tool-function tool) "suggestion two")
+    (should (equal (cdr suggestions) '("suggestion one" "suggestion two")))))
+
+(ert-deftest llm-test-report-result-pass ()
+  "A passing result with no suggestions should not signal."
+  (let ((result (make-llm-test-result :passed-p t :reason "ok"
+                                       :suggestions nil)))
+    ;; Should not error.
+    (llm-test--report-result result)))
+
+(ert-deftest llm-test-report-result-fail ()
+  "A failing result should call ert-fail."
+  (let ((result (make-llm-test-result :passed-p nil :reason "bad"
+                                       :suggestions nil)))
+    (should-error (llm-test--report-result result) :type 'ert-test-failed)))
+
+(ert-deftest llm-test-report-result-warnings-as-errors ()
+  "With warnings-as-errors, suggestions on a pass should fail."
+  (let ((llm-test-warnings-as-errors t)
+        (result (make-llm-test-result :passed-p t :reason "ok"
+                                       :suggestions '("fix this"))))
+    (should-error (llm-test--report-result result) :type 'ert-test-failed)))
+
+(ert-deftest llm-test-report-result-suggestions-no-error ()
+  "Without warnings-as-errors, suggestions on a pass should not fail."
+  (let ((llm-test-warnings-as-errors nil)
+        (result (make-llm-test-result :passed-p t :reason "ok"
+                                       :suggestions '("fix this"))))
+    ;; Should not error.
+    (llm-test--report-result result)))
+
 (provide 'llm-test-test)
 ;;; llm-test-test.el ends here
