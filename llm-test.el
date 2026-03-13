@@ -214,6 +214,22 @@ Returns the result as a string."
   :type 'integer
   :group 'llm-test)
 
+(defcustom llm-test-debug nil
+  "When non-nil, log each tool call and its result to *Messages*."
+  :type 'boolean
+  :group 'llm-test)
+
+(defun llm-test--wrap-tool-fn (name fn)
+  "Wrap tool function FN with debug logging under NAME."
+  (lambda (&rest args)
+    (when llm-test-debug
+      (message "llm-test tool %s called with: %S" name args))
+    (let ((result (apply fn args)))
+      (when llm-test-debug
+        (message "llm-test tool %s returned: %s" name
+                 (truncate-string-to-width (format "%S" result) 200)))
+      result)))
+
 (defun llm-test--make-tools (emacs-info suggestions)
   "Create the list of `llm-tool' structs for the test agent.
 EMACS-INFO is the plist from `llm-test--start-emacs'.
@@ -342,6 +358,15 @@ this zero or more times during a test."
     :args (list (list :name "reason" :type 'string
                       :description "Explanation of why the test failed.")))))
 
+(defun llm-test--apply-debug-wrapping (tools)
+  "Wrap each tool in TOOLS with debug logging when `llm-test-debug' is set."
+  (when llm-test-debug
+    (dolist (tool tools)
+      (setf (llm-tool-function tool)
+            (llm-test--wrap-tool-fn (llm-tool-name tool)
+                                    (llm-tool-function tool)))))
+  tools)
+
 (defconst llm-test--system-prompt
   "You are an Emacs test agent.  You are given a test description in natural \
 language and you must execute it step by step in a fresh Emacs process using \
@@ -434,7 +459,8 @@ so that Emacs remains responsive."
                   group-setup
                   (llm-test-spec-description test-spec)))
          (suggestions (list nil))
-         (tools (llm-test--make-tools emacs-info suggestions))
+         (tools (llm-test--apply-debug-wrapping
+                 (llm-test--make-tools emacs-info suggestions)))
          (prompt (llm-make-chat-prompt
                   user-message
                   :context llm-test--system-prompt
