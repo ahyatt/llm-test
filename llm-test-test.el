@@ -93,7 +93,7 @@
       (llm-test--stop-emacs info))))
 
 (ert-deftest llm-test-visible-buffer-contents ()
-  "The get-buffer-contents tool should return only visible window content."
+  "Window-start/window-end should return only visible content in the frame."
   (let ((info (llm-test--start-emacs)))
     (unwind-protect
         (progn
@@ -130,13 +130,14 @@
 (ert-deftest llm-test-suggestions-accumulate ()
   "The suggest-improvement tool should accumulate suggestions."
   (let* ((suggestions (list nil))
-         (tool (nth 5 (llm-test--make-tools
+         (tool (nth 2 (llm-test--make-tools
                        '(:server-name "x" :socket-dir "/tmp")
                        suggestions))))
-    ;; The suggest-improvement tool is at index 5.
+    ;; The suggest-improvement tool is at index 2.
     (should (equal (llm-tool-name tool) "suggest-improvement"))
-    (funcall (llm-tool-function tool) "suggestion one")
-    (funcall (llm-tool-function tool) "suggestion two")
+    ;; Async tools take a callback as the first argument.
+    (funcall (llm-tool-function tool) #'ignore "suggestion one")
+    (funcall (llm-tool-function tool) #'ignore "suggestion two")
     (should (equal (cdr suggestions) '("suggestion one" "suggestion two")))))
 
 (ert-deftest llm-test-send-keys-nonblocking ()
@@ -189,28 +190,28 @@
 (ert-deftest llm-test-report-result-pass ()
   "A passing result with no suggestions should not signal."
   (let ((result (make-llm-test-result :passed-p t :reason "ok"
-                                       :suggestions nil)))
+                                      :suggestions nil)))
     ;; Should not error.
     (llm-test--report-result result)))
 
 (ert-deftest llm-test-report-result-fail ()
   "A failing result should call ert-fail."
   (let ((result (make-llm-test-result :passed-p nil :reason "bad"
-                                       :suggestions nil)))
+                                      :suggestions nil)))
     (should-error (llm-test--report-result result) :type 'ert-test-failed)))
 
 (ert-deftest llm-test-report-result-warnings-as-errors ()
   "With warnings-as-errors, suggestions on a pass should fail."
   (let ((llm-test-warnings-as-errors t)
         (result (make-llm-test-result :passed-p t :reason "ok"
-                                       :suggestions '("fix this"))))
+                                      :suggestions '("fix this"))))
     (should-error (llm-test--report-result result) :type 'ert-test-failed)))
 
 (ert-deftest llm-test-report-result-suggestions-no-error ()
   "Without warnings-as-errors, suggestions on a pass should not fail."
   (let ((llm-test-warnings-as-errors nil)
         (result (make-llm-test-result :passed-p t :reason "ok"
-                                       :suggestions '("fix this"))))
+                                      :suggestions '("fix this"))))
     ;; Should not error.
     (llm-test--report-result result)))
 

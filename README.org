@@ -36,16 +36,7 @@ On each iteration the agent may call any of these tools:
 - *send-keys* -- Queue a key sequence (in Emacs ~kbd~ notation, e.g. ~C-x C-f~,
   ~M-x~, ~RET~) into the test Emacs as if typed by a user.  This is
   non-blocking: it schedules the keys via ~unread-command-events~ and returns
-  immediately.  The agent must then inspect the result with another tool.
-- *get-buffer-contents* -- Return the text currently visible in the window
-  displaying a given buffer.  This uses ~window-start~ / ~window-end~ so it
-  returns only what a human would see on screen, not the full buffer.  The agent
-  can scroll with ~send-keys~ and call this again to see more.
-- *get-buffer-list* -- List all buffer names in the test Emacs.
-- *get-minibuffer-contents* -- Check whether the minibuffer is active (e.g.
-  after ~M-x~ or a ~completing-read~ prompt) and return the prompt text and any
-  input entered so far.  The agent uses this to detect prompts and then responds
-  via ~send-keys~.
+  immediately.
 - *suggest-improvement* -- Record a UI/UX suggestion about the package under
   test.  This does not affect the pass/fail verdict.
 - *pass-test* / *fail-test* -- Declare the test outcome and end the loop.
@@ -54,19 +45,41 @@ On each iteration the agent may call any of these tools:
 
 The test Emacs runs as a daemon with a frame sized to ~llm-test-frame-width~ x
 ~llm-test-frame-height~ (default 80x40).  The agent never sees a graphical
-display.  Instead, it reads the state of Emacs through the tools above:
+display.  Instead, every tool response automatically includes a JSON snapshot of
+the entire frame state, appended after the tool's own result.  This means the
+agent gets a fresh view of Emacs after every action without needing to
+explicitly request it.
 
-- *Buffer contents*: ~get-buffer-contents~ returns the text between
-  ~window-start~ and ~window-end~ for the window showing the requested buffer.
-  If no window is showing the buffer, it is temporarily displayed in the
-  selected window and a ~redisplay~ is forced so the window boundaries are
-  meaningful.
-- *Minibuffer*: ~get-minibuffer-contents~ checks for an active minibuffer window
-  and returns ~minibuffer-prompt~ and ~minibuffer-contents-no-properties~.  This
-  lets the agent detect when a command is waiting for user input and respond
-  appropriately.
-- *Programmatic state*: ~eval-elisp~ can query any Emacs state -- point
-  position, mode, variable values, overlays, text properties, etc.
+The frame state JSON has this structure:
+
+#+begin_src json
+{
+  "windows": [
+    {
+      "buffer": "<buffer name>",
+      "mode": "<major mode>",
+      "selected": true,
+      "point": 1,
+      "contents": "<visible text in window>"
+    }
+  ],
+  "minibuffer": {
+    "active": false
+  }
+}
+#+end_src
+
+When the minibuffer is active (e.g. after ~M-x~ or a ~completing-read~ prompt),
+the ~minibuffer~ object includes ~prompt~ and ~input~ fields showing the prompt
+text and any input entered so far.
+
+Each window's ~contents~ field contains only what is visible on screen (between
+~window-start~ and ~window-end~), like a human looking at the Emacs frame.  The
+agent can scroll with ~send-keys~ and then call any tool to get an updated
+snapshot.
+
+The agent can also use ~eval-elisp~ to query any programmatic state -- point
+position, variable values, overlays, text properties, etc.
 
 * YAML Test Format
 

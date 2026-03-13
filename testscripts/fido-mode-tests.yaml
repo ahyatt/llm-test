@@ -1,0 +1,29 @@
+group: fido-mode completion
+setup: |
+  Enable fido-mode by evaluating (fido-mode 1).
+  Create three buffers named "alpha-buf", "beta-buf", and "gamma-buf"
+  by evaluating:
+    (progn
+      (get-buffer-create "alpha-buf")
+      (get-buffer-create "beta-buf")
+      (get-buffer-create "gamma-buf"))
+tests:
+  - description: |
+      Press C-x b to invoke switch-to-buffer.
+      Verify the minibuffer becomes active and shows a buffer
+      switching prompt with fido-mode completion candidates.
+      Type "alpha" to narrow the candidates to "alpha-buf",
+      then press RET to select it.
+      After the command completes, verify that the current buffer
+      is now "alpha-buf" by evaluating (buffer-name) with eval-elisp.
+  - description: |
+      First switch to "alpha-buf" using eval-elisp:
+        (switch-to-buffer "alpha-buf")
+      Then press C-x b to invoke switch-to-buffer.
+      Type "gam" to narrow the completion candidates.
+      Verify via the minibuffer state that the input contains "gam".
+      Then press TAB to try to complete the input further.
+      Verify the minibuffer input has been completed to "gamma-buf"
+      (or close to it).
+      Press RET to confirm.
+      Verify the current buffer is now "gamma-buf".
