@@ -224,12 +224,28 @@ API responses) while waiting, which would cause re-entrant callbacks."
   :type 'boolean
   :group 'llm-test)
 
+(defcustom llm-test-max-tool-result-length 2000
+  "Maximum character length for a tool result returned to the LLM.
+Results longer than this are truncated with a notice.  This prevents
+large return values (e.g. struct representations) from bloating the
+conversation context and causing API timeouts."
+  :type 'integer
+  :group 'llm-test)
+
+(defun llm-test--truncate-result (result)
+  "Truncate RESULT string if it exceeds `llm-test-max-tool-result-length'."
+  (if (and (stringp result)
+           (> (length result) llm-test-max-tool-result-length))
+      (concat (substring result 0 llm-test-max-tool-result-length)
+              "\n... [truncated]")
+    result))
+
 (defun llm-test--wrap-tool-fn (name fn)
-  "Wrap tool function FN with debug logging under NAME."
+  "Wrap tool function FN with debug logging and result truncation."
   (lambda (&rest args)
     (when llm-test-debug
       (message "llm-test tool %s called with: %S" name args))
-    (let ((result (apply fn args)))
+    (let ((result (llm-test--truncate-result (apply fn args))))
       (when llm-test-debug
         (message "llm-test tool %s returned: %s" name
                  (truncate-string-to-width (format "%S" result) 200)))
@@ -363,13 +379,12 @@ this zero or more times during a test."
     :args (list (list :name "reason" :type 'string
                       :description "Explanation of why the test failed.")))))
 
-(defun llm-test--apply-debug-wrapping (tools)
-  "Wrap each tool in TOOLS with debug logging when `llm-test-debug' is set."
-  (when llm-test-debug
-    (dolist (tool tools)
-      (setf (llm-tool-function tool)
-            (llm-test--wrap-tool-fn (llm-tool-name tool)
-                                    (llm-tool-function tool)))))
+(defun llm-test--apply-tool-wrapping (tools)
+  "Wrap each tool in TOOLS with result truncation and optional debug logging."
+  (dolist (tool tools)
+    (setf (llm-tool-function tool)
+          (llm-test--wrap-tool-fn (llm-tool-name tool)
+                                  (llm-tool-function tool))))
   tools)
 
 (defconst llm-test--system-prompt
@@ -427,9 +442,15 @@ iteration limit."
                 :reason (format "Agent did not reach a verdict after %d iterations"
                                 llm-test-max-iterations)
                 :suggestions (cdr suggestions)))
+    (when llm-test-debug
+      (message "llm-test iteration %d: calling llm-chat-async" iteration))
     (llm-chat-async
      provider prompt
      (lambda (result)
+       (when llm-test-debug
+         (message "llm-test iteration %d: got response, tool-results=%S"
+                  iteration (and (plistp result)
+                                 (plist-get result :tool-results))))
        (let* ((tool-results (plist-get result :tool-results))
               (pass-result (assoc-default "pass-test" tool-results))
               (fail-result (assoc-default "fail-test" tool-results)))
@@ -446,6 +467,8 @@ iteration limit."
            (llm-test--run-test-async provider prompt (1+ iteration)
                                      suggestions callback)))))
      (lambda (_ err)
+       (when llm-test-debug
+         (message "llm-test iteration %d: LLM error: %s" iteration err))
        (funcall callback
                 (make-llm-test-result
                  :passed-p nil
@@ -464,7 +487,7 @@ so that Emacs remains responsive."
                   group-setup
                   (llm-test-spec-description test-spec)))
          (suggestions (list nil))
-         (tools (llm-test--apply-debug-wrapping
+         (tools (llm-test--apply-tool-wrapping
                  (llm-test--make-tools emacs-info suggestions)))
          (prompt (llm-make-chat-prompt
                   user-message
