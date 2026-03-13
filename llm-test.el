@@ -174,19 +174,33 @@ Returns a plist with :process, :server-name, :socket-dir, and :init-file."
 (defun llm-test--eval-in-emacs (emacs-info sexp)
   "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
 SEXP should be a string of elisp to evaluate.
-Returns the result as a string."
+Returns the result as a string.  Times out after `llm-test-timeout' seconds."
   (let* ((server-name (plist-get emacs-info :server-name))
-         (socket-dir (plist-get emacs-info :socket-dir)))
-    (with-temp-buffer
-      (let ((exit-code
-             (call-process "emacsclient" nil t nil
-                           (format "--socket-name=%s"
-                                   (expand-file-name server-name socket-dir))
-                           "--eval" sexp)))
-        (if (= exit-code 0)
-            (string-trim (buffer-string))
-          (error "emacsclient eval failed (exit %d): %s"
-                 exit-code (buffer-string)))))))
+         (socket-dir (plist-get emacs-info :socket-dir))
+         (buf (generate-new-buffer " *llm-test-eval*"))
+         (proc (start-process "llm-test-emacsclient" buf
+                              "emacsclient"
+                              (format "--socket-name=%s"
+                                      (expand-file-name server-name socket-dir))
+                              "--eval" sexp))
+         (deadline (+ (float-time) llm-test-timeout)))
+    ;; Suppress sentinel messages in the output buffer.
+    (set-process-sentinel proc #'ignore)
+    (unwind-protect
+        (progn
+          (while (and (process-live-p proc)
+                      (< (float-time) deadline))
+            (accept-process-output proc 0.1))
+          (unless (memq (process-status proc) '(exit signal))
+            (kill-process proc)
+            (error "emacsclient timed out after %d seconds" llm-test-timeout))
+          (let ((exit-code (process-exit-status proc)))
+            (with-current-buffer buf
+              (if (= exit-code 0)
+                  (string-trim (buffer-string))
+                (error "emacsclient eval failed (exit %d): %s"
+                       exit-code (buffer-string))))))
+      (kill-buffer buf))))
 
 (defun llm-test--stop-emacs (emacs-info)
   "Stop the test Emacs process described by EMACS-INFO."
