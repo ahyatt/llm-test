@@ -47,7 +47,7 @@
 
 (defcustom llm-test-emacs-executable "emacs"
   "Path to the Emacs executable used to run tests.
-A fresh Emacs process (emacs -Q) is launched for each test."
+A fresh Emacs process (`emacs -Q') is launched for each test."
   :type 'string
   :group 'llm-test)
 
@@ -188,7 +188,7 @@ API responses) while waiting, which would cause re-entrant callbacks."
                            "--eval" sexp)))
         (if (= exit-code 0)
             (string-trim (buffer-string))
-          (error "emacsclient eval failed (exit %d): %s"
+          (error "Emacsclient eval failed (exit %d): %s"
                  exit-code (buffer-string)))))))
 
 (defun llm-test--eval-in-emacs-async (emacs-info sexp)
@@ -213,7 +213,7 @@ does not block the Emacs event loop."
           (futur-done output)
         (futur-failed
          (list 'error
-               (format "emacsclient eval failed (exit %d): %s"
+               (format "Emacsclient eval failed (exit %d): %s"
                        exit-code output)))))))
 
 (defun llm-test--stop-emacs (emacs-info)
