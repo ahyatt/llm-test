@@ -4,7 +4,7 @@
 
 ;; Author: Andrew Hyatt <ahyatt@gmail.com>
 ;; Homepage: https://github.com/ahyatt/llm-test
-;; Package-Requires: ((emacs "28.1") (llm "0.18.0") (yaml "0.5.0"))
+;; Package-Requires: ((emacs "28.1") (llm "0.18.0") (yaml "0.5.0") (futur "1.2"))
 ;; Keywords: testing, tools
 ;; Version: 0.1.0
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -39,6 +39,7 @@
 (require 'yaml)
 (require 'ert)
 (require 'cl-lib)
+(require 'futur)
 
 (defgroup llm-test nil
   "LLM-driven testing for Emacs packages."
@@ -46,7 +47,7 @@
 
 (defcustom llm-test-emacs-executable "emacs"
   "Path to the Emacs executable used to run tests.
-A fresh Emacs process (emacs -Q) is launched for each test."
+A fresh Emacs process (`emacs -Q') is launched for each test."
   :type 'string
   :group 'llm-test)
 
@@ -154,7 +155,7 @@ Returns a plist with :process, :server-name, :socket-dir, and :init-file."
           (socket-file (expand-file-name server-name socket-dir)))
       (while (and (< (float-time) deadline)
                   (not (file-exists-p socket-file)))
-        (sleep-for 0.1))
+        (sit-for 0.1))
       (unless (file-exists-p socket-file)
         (when (process-live-p process)
           (kill-process process))
@@ -187,8 +188,33 @@ API responses) while waiting, which would cause re-entrant callbacks."
                            "--eval" sexp)))
         (if (= exit-code 0)
             (string-trim (buffer-string))
-          (error "emacsclient eval failed (exit %d): %s"
+          (error "Emacsclient eval failed (exit %d): %s"
                  exit-code (buffer-string)))))))
+
+(defun llm-test--eval-in-emacs-async (emacs-info sexp)
+  "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
+SEXP should be a string of elisp to evaluate.
+Returns a `futur' that resolves to the result string, or signals an
+error if emacsclient fails.  Unlike `llm-test--eval-in-emacs', this
+does not block the Emacs event loop."
+  (let* ((server-name (plist-get emacs-info :server-name))
+         (socket-dir (plist-get emacs-info :socket-dir))
+         (buf (generate-new-buffer " *llm-test-eval*" t)))
+    (futur-let*
+        ((exit-code <- (futur-process-call
+                        "emacsclient" nil buf nil
+                        (format "--socket-name=%s"
+                                (expand-file-name server-name socket-dir))
+                        "--eval" sexp))
+         (output (with-current-buffer buf
+                   (prog1 (string-trim (buffer-string))
+                     (kill-buffer buf)))))
+      (if (= exit-code 0)
+          (futur-done output)
+        (futur-failed
+         (list 'error
+               (format "Emacsclient eval failed (exit %d): %s"
+                       exit-code output)))))))
 
 (defun llm-test--stop-emacs (emacs-info)
   "Stop the test Emacs process described by EMACS-INFO."
@@ -229,6 +255,59 @@ conversation context and causing API timeouts."
   :type 'integer
   :group 'llm-test)
 
+(defconst llm-test--frame-state-elisp
+  "(progn
+     (require 'json)
+     (redisplay t)
+     (let* ((wins (window-list nil 'no-minibuf))
+            (parts nil))
+       (dolist (w wins)
+         (let* ((buf (window-buffer w))
+                (name (buffer-name buf))
+                (sel (eq w (selected-window)))
+                (start (window-start w))
+                (end (window-end w t))
+                (contents (with-current-buffer buf
+                            (buffer-substring-no-properties start end)))
+                (mode (with-current-buffer buf
+                        (symbol-name major-mode)))
+                (pt (with-current-buffer buf
+                      (point))))
+           (push (format
+                  \"{\\\"buffer\\\": %s, \\\"mode\\\": %s, \\\"selected\\\": %s, \\\"point\\\": %d, \\\"contents\\\": %s}\"
+                  (json-encode-string name)
+                  (json-encode-string mode)
+                  (if sel \"true\" \"false\")
+                  pt
+                  (json-encode-string contents))
+                 parts)))
+       (let ((mini (if (active-minibuffer-window)
+                       (with-current-buffer
+                           (window-buffer (active-minibuffer-window))
+                         (format
+                          \"{\\\"active\\\": true, \\\"prompt\\\": %s, \\\"input\\\": %s}\"
+                          (json-encode-string (or (minibuffer-prompt) \"\"))
+                          (json-encode-string
+                           (minibuffer-contents-no-properties))))
+                     \"{\\\"active\\\": false}\")))
+         (format \"{\\\"windows\\\": [%s], \\\"minibuffer\\\": %s}\"
+                 (mapconcat #'identity (nreverse parts) \", \")
+                 mini))))"
+  "Elisp expression that captures the full frame state as a JSON string.
+Returns a JSON object with `windows' (array of window objects each
+having buffer, mode, selected, point, contents) and `minibuffer'
+\(object with active, and optionally prompt and input).")
+
+(defun llm-test--capture-frame-state-async (emacs-info)
+  "Capture the current frame state of the test Emacs as a JSON string.
+EMACS-INFO is the plist from `llm-test--start-emacs'.
+Returns a futur that resolves to the JSON string."
+  (futur-bind
+   (llm-test--eval-in-emacs-async emacs-info llm-test--frame-state-elisp)
+   #'futur-done
+   (lambda (err)
+     (futur-done (format "{\"error\": \"%s\"}" err)))))
+
 (defun llm-test--truncate-result (result)
   "Truncate RESULT string if it exceeds `llm-test-max-tool-result-length'."
   (if (and (stringp result)
@@ -237,16 +316,31 @@ conversation context and causing API timeouts."
               "\n... [truncated]")
     result))
 
-(defun llm-test--wrap-tool-fn (name fn)
-  "Wrap tool function FN with debug logging and result truncation."
-  (lambda (&rest args)
+(defun llm-test--wrap-tool-fn (name fn emacs-info)
+  "Wrap tool function FN with debug logging, truncation, and frame state.
+NAME is the tool name for logging.  EMACS-INFO is the subprocess plist
+used to capture frame state after each call.
+FN is an async tool function that takes a callback as its first argument.
+The returned wrapper is also async (takes callback as first arg)."
+  (lambda (callback &rest args)
     (when llm-test-debug
       (message "llm-test tool %s called with: %S" name args))
-    (let ((result (llm-test--truncate-result (apply fn args))))
-      (when llm-test-debug
-        (message "llm-test tool %s returned: %s" name
-                 (truncate-string-to-width (format "%S" result) 200)))
-      result)))
+    (apply fn
+           (lambda (raw-result)
+             (when llm-test-debug
+               (message "llm-test tool %s returned: %s" name
+                        (truncate-string-to-width
+                         (format "%S" raw-result) 200)))
+             (futur-bind
+              (llm-test--capture-frame-state-async emacs-info)
+              (lambda (frame-state)
+                (let ((result
+                       (llm-test--truncate-result
+                        (format "%s\n\nFrame state:\n%s"
+                                raw-result frame-state))))
+                  (funcall callback result)
+                  (futur-done nil)))))
+           args)))
 
 (defun llm-test--make-tools (emacs-info suggestions)
   "Create the list of `llm-tool' structs for the test agent.
@@ -255,105 +349,68 @@ SUGGESTIONS is a list (mutated by reference) that accumulates
 improvement suggestions from the agent."
   (list
    (make-llm-tool
-    :function (lambda (code)
-                (condition-case err
-                    (llm-test--eval-in-emacs emacs-info code)
-                  (error (format "ERROR: %s" (error-message-string err)))))
+    :function (lambda (callback code)
+                (futur-bind
+                 (llm-test--eval-in-emacs-async emacs-info code)
+                 (lambda (result)
+                   (funcall callback result)
+                   (futur-done nil))
+                 (lambda (err)
+                   (funcall callback
+                            (format "ERROR: %s" err))
+                   (futur-done nil))))
     :name "eval-elisp"
+    :async t
     :description "Evaluate an Emacs Lisp expression in the test Emacs process and return the printed result."
     :args (list (list :name "code" :type 'string
                       :description "The Emacs Lisp expression to evaluate, as a string.")))
 
    (make-llm-tool
-    :function (lambda (buffer-name)
-                (condition-case err
-                    (llm-test--eval-in-emacs
-                     emacs-info
-                     (format "(progn
-                                (let ((w (get-buffer-window %S t)))
-                                  (unless w
-                                    (set-window-buffer (selected-window) %S)
-                                    (setq w (selected-window)))
-                                  (redisplay t)
-                                  (with-current-buffer %S
-                                    (buffer-substring-no-properties
-                                     (window-start w)
-                                     (window-end w t)))))"
-                             buffer-name buffer-name buffer-name))
-                  (error (format "ERROR: %s" (error-message-string err)))))
-    :name "get-buffer-contents"
-    :description "Get the text currently visible in the window displaying a buffer.
-This returns only what would be on screen, not the full buffer.  Use
-scroll-down-command / scroll-up-command via send-keys to see more content."
-    :args (list (list :name "buffer_name" :type 'string
-                      :description "The name of the buffer to read.")))
-
-   (make-llm-tool
-    :function (lambda ()
-                (condition-case err
-                    (llm-test--eval-in-emacs
-                     emacs-info
-                     "(mapcar #'buffer-name (buffer-list))")
-                  (error (format "ERROR: %s" (error-message-string err)))))
-    :name "get-buffer-list"
-    :description "List all buffer names in the test Emacs."
-    :args nil)
-
-   (make-llm-tool
-    :function (lambda (keys)
-                (condition-case err
-                    (llm-test--eval-in-emacs
-                     emacs-info
-                     (format
-                      "(progn
-                         (setq unread-command-events
-                               (append unread-command-events
-                                       (listify-key-sequence (kbd %S))))
-                         (format \"Keys queued (%%s pending)\"
-                                 (length unread-command-events)))"
-                      keys))
-                  (error (format "ERROR: %s" (error-message-string err)))))
+    :function (lambda (callback keys)
+                (futur-bind
+                 (llm-test--eval-in-emacs-async
+                  emacs-info
+                  (format
+                   "(progn
+                      (setq unread-command-events
+                            (append unread-command-events
+                                    (listify-key-sequence (kbd %S))))
+                      (format \"Keys queued (%%s pending)\"
+                              (length unread-command-events)))"
+                   keys))
+                 (lambda (result)
+                   (funcall callback result)
+                   (futur-done nil))
+                 (lambda (err)
+                   (funcall callback
+                            (format "ERROR: %s" err))
+                   (futur-done nil))))
     :name "send-keys"
+    :async t
     :description "Send a key sequence to the test Emacs, as if typed by a user.
 Use Emacs key notation (e.g. \"C-x C-f\", \"M-x\", \"RET\").
 
 This is non-blocking: it queues the keys and returns immediately.
 The keys are processed by the Emacs command loop after this call
-returns.  After calling send-keys, use get-buffer-contents or
-get-minibuffer-contents to observe the effect.
+returns.  The frame state in the response may not yet reflect the
+effect of the keys; call eval-elisp with a no-op expression such as
+\"t\" to get an updated frame state if needed.
 
 If a key triggers a command that prompts for input (completing-read,
-read-string, etc.), the minibuffer becomes active.  Use
-get-minibuffer-contents to see the prompt, then call send-keys again
-with the response (e.g. \"D O N E RET\").  The keys are fed directly
-into the active prompt."
+read-string, etc.), the minibuffer will become active, which will be
+visible in the frame state.  Call send-keys again with the response
+\(e.g. \"D O N E RET\").  The keys are fed directly into the active
+prompt."
     :args (list (list :name "keys" :type 'string
                       :description "Key sequence in Emacs notation.")))
 
    (make-llm-tool
-    :function (lambda ()
-                (condition-case err
-                    (llm-test--eval-in-emacs
-                     emacs-info
-                     "(if (active-minibuffer-window)
-                          (with-current-buffer (window-buffer (active-minibuffer-window))
-                            (format \"Prompt: %s\\nInput so far: %s\"
-                                    (or (minibuffer-prompt) \"\")
-                                    (minibuffer-contents-no-properties)))
-                        \"No active minibuffer\")")
-                  (error (format "ERROR: %s" (error-message-string err)))))
-    :name "get-minibuffer-contents"
-    :description "Check whether a minibuffer prompt is active and return its contents.
-Returns the prompt text and any input typed so far, or a message
-indicating no minibuffer is active.  Use this after send-keys to see
-if a command opened a prompt that needs a response."
-    :args nil)
-
-   (make-llm-tool
-    :function (lambda (suggestion)
+    :function (lambda (callback suggestion)
                 (nconc suggestions (list suggestion))
-                (format "Suggestion recorded: %s" suggestion))
+                (funcall callback
+                         (format "Suggestion recorded: %s" suggestion)))
     :name "suggest-improvement"
+    :async t
     :description "Record a suggestion for improving the UI or behavior of the
 package under test.  This does NOT affect the pass/fail verdict — call it
 whenever you notice something that could be better (confusing labels,
@@ -363,25 +420,31 @@ this zero or more times during a test."
                       :description "A description of the improvement you suggest.")))
 
    (make-llm-tool
-    :function (lambda (reason) (format "PASS: %s" reason))
+    :function (lambda (callback reason)
+                (funcall callback (format "PASS: %s" reason)))
     :name "pass-test"
+    :async t
     :description "Signal that the current test has PASSED.  Call this when you have verified the expected outcome."
     :args (list (list :name "reason" :type 'string
                       :description "Explanation of why the test passed.")))
 
    (make-llm-tool
-    :function (lambda (reason) (format "FAIL: %s" reason))
+    :function (lambda (callback reason)
+                (funcall callback (format "FAIL: %s" reason)))
     :name "fail-test"
+    :async t
     :description "Signal that the current test has FAILED.  Call this when the observed behavior does not match expectations."
     :args (list (list :name "reason" :type 'string
                       :description "Explanation of why the test failed.")))))
 
-(defun llm-test--apply-tool-wrapping (tools)
-  "Wrap each tool in TOOLS with result truncation and optional debug logging."
+(defun llm-test--apply-tool-wrapping (tools emacs-info)
+  "Wrap each tool in TOOLS with truncation, debug logging, and frame state.
+EMACS-INFO is the subprocess plist used to capture frame state."
   (dolist (tool tools)
     (setf (llm-tool-function tool)
           (llm-test--wrap-tool-fn (llm-tool-name tool)
-                                  (llm-tool-function tool))))
+                                  (llm-tool-function tool)
+                                  emacs-info)))
   tools)
 
 (defconst llm-test--system-prompt
@@ -389,11 +452,35 @@ this zero or more times during a test."
 language and you must execute it step by step in a fresh Emacs process using \
 the provided tools.
 
+Every tool response includes a \"Frame state\" section at the end, which is a \
+JSON snapshot of the entire Emacs frame.  The JSON has this structure:
+
+{
+  \"windows\": [
+    {
+      \"buffer\": \"<buffer name>\",
+      \"mode\": \"<major mode>\",
+      \"selected\": true/false,
+      \"point\": <integer>,
+      \"contents\": \"<visible text in window>\"
+    }
+  ],
+  \"minibuffer\": {
+    \"active\": true/false,
+    \"prompt\": \"<prompt text>\",   // only when active
+    \"input\": \"<input so far>\"    // only when active
+  }
+}
+
+The window contents show only what is visible on screen (like a human looking \
+at the Emacs frame), not the full buffer.  Use send-keys to scroll (e.g. \
+\"C-v\" / \"M-v\") and then call any tool to get an updated frame state.
+
 Your workflow:
 1. Read the setup instructions and execute them using eval-elisp or send-keys.
 2. Read the test description and perform the actions described.
-3. After performing the actions, verify the expected outcome by inspecting \
-the visible buffer contents, evaluating elisp expressions, etc.
+3. After performing the actions, verify the expected outcome using the frame \
+state and/or eval-elisp.
 4. Call pass-test if the outcome matches expectations, or fail-test if it \
 does not.
 
@@ -401,18 +488,10 @@ Important rules:
 - Always call exactly one of pass-test or fail-test before finishing.
 - Use eval-elisp for programmatic operations and state inspection.
 - Use send-keys when the test requires simulating interactive user input.
-- send-keys is non-blocking: it schedules the keys and returns immediately.  \
-After calling send-keys, call get-buffer-contents or get-minibuffer-contents \
-to observe the effect.
-- get-buffer-contents returns only what is visible in the window (like a \
-human looking at the screen).  To see more content, use send-keys to scroll \
-(e.g. \"C-v\" to scroll down, \"M-v\" to scroll up) and then call \
-get-buffer-contents again.
-- When a key triggers a command that prompts for input (completing-read, \
-read-string, etc.), the minibuffer becomes active.  Call \
-get-minibuffer-contents to see the prompt, then call send-keys with the \
-response (e.g. \"D O N E RET\").  The keys are fed directly into the active \
-prompt.
+- send-keys is non-blocking: the keys may not be processed before the frame \
+state is captured.  Call eval-elisp with \"t\" if you need a fresh snapshot.
+- When the minibuffer is active (visible in the frame state), respond to the \
+prompt by calling send-keys with the input and RET.
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
 - Be thorough: verify the actual state, don't assume operations succeeded.
@@ -485,7 +564,8 @@ so that Emacs remains responsive."
                   (llm-test-spec-description test-spec)))
          (suggestions (list nil))
          (tools (llm-test--apply-tool-wrapping
-                 (llm-test--make-tools emacs-info suggestions)))
+                 (llm-test--make-tools emacs-info suggestions)
+                 emacs-info))
          (prompt (llm-make-chat-prompt
                   user-message
                   :context llm-test--system-prompt
@@ -498,7 +578,9 @@ so that Emacs remains responsive."
        (setq final-result result
              done t)))
     (while (not done)
-      (accept-process-output nil 0.1))
+      ;; Process all events (user input, redisplay, timers, subprocess
+      ;; I/O) so that Emacs remains responsive during the test.
+      (sit-for 0.1))
     final-result))
 
 ;;; Test Loading
