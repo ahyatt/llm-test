@@ -640,7 +640,7 @@ INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
                                                idx description)
                         :body (lambda ()
                                 (let ((emacs-info (llm-test--start-emacs
-                                                   :load-path the-load-path
+                                                   :extra-load-path the-load-path
                                                    :init-forms the-init-forms)))
                                   (unwind-protect
                                       (let ((result (llm-test--run-test
