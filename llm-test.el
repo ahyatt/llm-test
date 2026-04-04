@@ -292,7 +292,7 @@ does not block the Emacs event loop."
 
 ;;; Agent Tools and Loop
 
-(defcustom llm-test-max-iterations 20
+(defcustom llm-test-max-iterations 100
   "Maximum number of agent iterations before forcing a timeout failure."
   :type 'integer
   :group 'llm-test)
