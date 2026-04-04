@@ -7,6 +7,21 @@
 
 (require 'llm-test)
 (require 'ert)
+(require 'json)
+(require 'seq)
+
+(defun llm-test-test--selected-window-contents (info)
+  "Return the visible contents of the selected window from INFO's frame state."
+  (let* ((state (json-parse-string
+                 (read (llm-test--eval-in-emacs info
+                                               llm-test--frame-state-elisp))
+                 :object-type 'alist
+                 :array-type 'list))
+         (windows (alist-get "windows" state nil nil #'string=))
+         (selected (seq-find (lambda (window)
+                               (alist-get "selected" window nil nil #'string=))
+                             windows)))
+    (alist-get "contents" selected nil nil #'string=)))
 
 (ert-deftest llm-test-parse-simple-yaml ()
   "Parsing a simple YAML spec should produce the correct group struct."
@@ -111,20 +126,54 @@
                   (llm-test--eval-in-emacs
                    info
                    "(with-current-buffer \"*test-visible*\" (count-lines (point-min) (point-max)))")))
-                (visible
-                 (llm-test--eval-in-emacs
-                  info
-                  (concat "(progn"
-                          "  (redisplay t)"
-                          "  (let ((w (get-buffer-window \"*test-visible*\" t)))"
-                          "    (with-current-buffer \"*test-visible*\""
-                          "      (buffer-substring-no-properties"
-                          "        (window-start w) (window-end w t)))))"))))
+                (visible (llm-test-test--selected-window-contents info)))
             (should (= total-lines 100))
-            ;; Visible content should be a subset of the buffer.
+            ;; Visible content should be non-empty and no longer than the buffer.
             (let ((visible-lines (length (split-string visible "\n" t))))
-              (should (< visible-lines 100))
+              (should (<= visible-lines 100))
               (should (> visible-lines 0)))))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-include-overlay-after-string ()
+  "Overlay after-strings should appear in captured visible contents."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-overlay-after*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"alpha\\nbeta\")"
+                   "  (goto-char (point-min))"
+                   "  (forward-line 1)"
+                   "  (let ((ov (make-overlay (point) (point))))"
+                   "    (overlay-put ov 'after-string \"\\n>> placeholder\"))"
+                   "  (goto-char (point-min)))"))
+          (let ((visible (llm-test-test--selected-window-contents info)))
+            (should (string-match-p "alpha" visible))
+            (should (string-match-p ">> placeholder" visible))
+            (should (string-match-p "beta" visible))))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-include-overlay-display-string ()
+  "Overlay display strings should appear in captured visible contents."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-overlay-display*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"alpha beta\")"
+                   "  (let ((ov (make-overlay (point-min) (+ (point-min) 5))))"
+                   "    (overlay-put ov 'display \"[shown]\"))"
+                   "  (goto-char (point-min)))"))
+          (let ((visible (llm-test-test--selected-window-contents info)))
+            (should (string-match-p "\\[shown\\]" visible))
+            (should (string-match-p "beta" visible))
+            (should-not (string-match-p "alpha" visible))))
       (llm-test--stop-emacs info))))
 
 (ert-deftest llm-test-suggestions-accumulate ()

@@ -257,42 +257,133 @@ conversation context and causing API timeouts."
 
 (defconst llm-test--frame-state-elisp
   "(progn
+     (require 'cl-lib)
      (require 'json)
      (redisplay t)
-     (let* ((wins (window-list nil 'no-minibuf))
-            (parts nil))
-       (dolist (w wins)
-         (let* ((buf (window-buffer w))
-                (name (buffer-name buf))
-                (sel (eq w (selected-window)))
-                (start (window-start w))
-                (end (window-end w t))
-                (contents (with-current-buffer buf
-                            (buffer-substring-no-properties start end)))
-                (mode (with-current-buffer buf
-                        (symbol-name major-mode)))
-                (pt (with-current-buffer buf
-                      (point))))
-           (push (format
-                  \"{\\\"buffer\\\": %s, \\\"mode\\\": %s, \\\"selected\\\": %s, \\\"point\\\": %d, \\\"contents\\\": %s}\"
-                  (json-encode-string name)
-                  (json-encode-string mode)
-                  (if sel \"true\" \"false\")
-                  pt
-                  (json-encode-string contents))
-                 parts)))
-       (let ((mini (if (active-minibuffer-window)
-                       (with-current-buffer
-                           (window-buffer (active-minibuffer-window))
-                         (format
-                          \"{\\\"active\\\": true, \\\"prompt\\\": %s, \\\"input\\\": %s}\"
-                          (json-encode-string (or (minibuffer-prompt) \"\"))
-                          (json-encode-string
-                           (minibuffer-contents-no-properties))))
-                     \"{\\\"active\\\": false}\")))
-         (format \"{\\\"windows\\\": [%s], \\\"minibuffer\\\": %s}\"
-                 (mapconcat #'identity (nreverse parts) \", \")
-                 mini))))"
+     (cl-labels
+         ((llm-test--plain-string (value)
+            (cond
+             ((stringp value) (substring-no-properties value))
+             ((and (consp value) (stringp (car value)))
+              (substring-no-properties (car value)))
+             (t nil)))
+          (llm-test--add-event (table pos string)
+            (when (and string pos)
+              (puthash pos (append (gethash pos table) (list string)) table)))
+          (llm-test--append-events (table pos pieces)
+            (dolist (string (gethash pos table))
+              (push string pieces))
+            pieces)
+          (llm-test--display-overlay-at (overlays pos)
+            (car
+             (sort
+              (delq nil
+                    (mapcar
+                     (lambda (ov)
+                       (let ((display
+                              (llm-test--plain-string
+                               (overlay-get ov 'display))))
+                         (when (and display
+                                    (overlay-start ov)
+                                    (overlay-end ov)
+                                    (<= (overlay-start ov) pos)
+                                    (< pos (overlay-end ov)))
+                           (list (or (overlay-get ov 'priority) 0)
+                                 (overlay-end ov)
+                                 display))))
+                     overlays))
+              (lambda (a b) (> (car a) (car b))))))
+          (llm-test--window-contents (w)
+            (with-current-buffer (window-buffer w)
+              (let* ((start (window-start w))
+                     (end (window-end w t))
+                     (overlays (cl-remove-duplicates
+                                (append (overlays-in start end)
+                                        (overlays-at start)
+                                        (overlays-at end))
+                                :test #'eq))
+                     (before-table (make-hash-table :test #'eql))
+                     (after-table (make-hash-table :test #'eql))
+                     (pieces nil)
+                     (pos start))
+                (dolist (ov overlays)
+                  (let* ((ov-start (overlay-start ov))
+                         (ov-end (overlay-end ov))
+                         (before
+                          (llm-test--plain-string
+                           (overlay-get ov 'before-string)))
+                         (after
+                          (llm-test--plain-string
+                           (overlay-get ov 'after-string)))
+                         (display
+                          (llm-test--plain-string
+                           (overlay-get ov 'display))))
+                    (when (and before ov-start
+                               (<= start ov-start) (<= ov-start end))
+                      (llm-test--add-event before-table ov-start before))
+                    (when (and display ov-start ov-end (= ov-start ov-end)
+                               (<= start ov-start) (<= ov-start end))
+                      (llm-test--add-event before-table ov-start display))
+                    (when (and after ov-end
+                               (<= start ov-end) (<= ov-end end))
+                      (llm-test--add-event
+                       (if (and ov-start (= ov-start ov-end))
+                           before-table
+                         after-table)
+                       ov-end
+                       after))))
+                (while (< pos end)
+                  (setq pieces
+                        (llm-test--append-events before-table pos pieces))
+                  (let ((display-data
+                         (llm-test--display-overlay-at overlays pos)))
+                    (if display-data
+                        (progn
+                          (push (nth 2 display-data) pieces)
+                          (setq pos (nth 1 display-data))
+                          (setq pieces
+                                (llm-test--append-events
+                                 after-table pos pieces)))
+                      (push (buffer-substring-no-properties pos (1+ pos))
+                            pieces)
+                      (setq pos (1+ pos))
+                      (setq pieces
+                            (llm-test--append-events
+                             after-table pos pieces)))))
+                (setq pieces
+                      (llm-test--append-events before-table pos pieces))
+                (apply #'concat (nreverse pieces))))))
+       (let* ((wins (window-list nil 'no-minibuf))
+              (parts nil))
+         (dolist (w wins)
+           (let* ((buf (window-buffer w))
+                  (name (buffer-name buf))
+                  (sel (eq w (selected-window)))
+                  (contents (llm-test--window-contents w))
+                  (mode (with-current-buffer buf
+                          (symbol-name major-mode)))
+                  (pt (with-current-buffer buf
+                        (point))))
+             (push (format
+                    \"{\\\"buffer\\\": %s, \\\"mode\\\": %s, \\\"selected\\\": %s, \\\"point\\\": %d, \\\"contents\\\": %s}\"
+                    (json-encode-string name)
+                    (json-encode-string mode)
+                    (if sel \"true\" \"false\")
+                    pt
+                    (json-encode-string contents))
+                   parts)))
+         (let ((mini (if (active-minibuffer-window)
+                         (with-current-buffer
+                             (window-buffer (active-minibuffer-window))
+                           (format
+                            \"{\\\"active\\\": true, \\\"prompt\\\": %s, \\\"input\\\": %s}\"
+                            (json-encode-string (or (minibuffer-prompt) \"\"))
+                            (json-encode-string
+                             (minibuffer-contents-no-properties))))
+                       \"{\\\"active\\\": false}\")))
+           (format \"{\\\"windows\\\": [%s], \\\"minibuffer\\\": %s}\"
+                   (mapconcat #'identity (nreverse parts) \", \")
+                   mini)))))"
   "Elisp expression that captures the full frame state as a JSON string.
 Returns a JSON object with `windows' (array of window objects each
 having buffer, mode, selected, point, contents) and `minibuffer'
