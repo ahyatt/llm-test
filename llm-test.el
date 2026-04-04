@@ -322,6 +322,11 @@ conversation context and causing API timeouts."
              ((and (consp value) (stringp (car value)))
               (substring-no-properties (car value)))
              (t nil)))
+          (llm-test--display-replacement (value)
+            (cond
+             ((null value) nil)
+             ((llm-test--plain-string value))
+             (t \"[display]\")))
           (llm-test--add-event (table pos string)
             (when (and string pos)
               (puthash pos (append (gethash pos table) (list string)) table)))
@@ -329,25 +334,29 @@ conversation context and causing API timeouts."
             (dolist (string (gethash pos table))
               (push string pieces))
             pieces)
-          (llm-test--display-overlay-at (overlays pos)
-            (car
-             (sort
-              (delq nil
-                    (mapcar
-                     (lambda (ov)
-                       (let ((display
-                              (llm-test--plain-string
-                               (overlay-get ov 'display))))
-                         (when (and display
-                                    (overlay-start ov)
-                                    (overlay-end ov)
-                                    (<= (overlay-start ov) pos)
-                                    (< pos (overlay-end ov)))
-                           (list (or (overlay-get ov 'priority) 0)
-                                 (overlay-end ov)
-                                 display))))
-                     overlays))
-              (lambda (a b) (> (car a) (car b))))))
+          (llm-test--display-state-at (pos end)
+            (let* ((display-data (get-char-property-and-overlay pos 'display))
+                   (overlay (cdr display-data))
+                   (display (llm-test--display-replacement
+                             (car display-data)))
+                   (display-end
+                    (if overlay
+                        (overlay-end overlay)
+                      (next-single-char-property-change
+                       pos 'display nil end))))
+              (when display
+                (list display overlay display-end))))
+          (llm-test--next-boundary (pos end)
+            (min end
+                 (next-overlay-change pos)
+                 (next-single-char-property-change pos 'display nil end)))
+          (llm-test--next-display-change (pos end active-state)
+            (let ((next (llm-test--next-boundary pos end)))
+              (while (and (< next end)
+                          (equal (llm-test--display-state-at next end)
+                                 active-state))
+                (setq next (llm-test--next-boundary next end)))
+              next))
           (llm-test--window-contents (w)
             (with-current-buffer (window-buffer w)
               (let* ((start (window-start w))
@@ -371,7 +380,7 @@ conversation context and causing API timeouts."
                           (llm-test--plain-string
                            (overlay-get ov 'after-string)))
                          (display
-                          (llm-test--plain-string
+                          (llm-test--display-replacement
                            (overlay-get ov 'display))))
                     (when (and before ov-start
                                (<= start ov-start) (<= ov-start end))
@@ -390,21 +399,26 @@ conversation context and causing API timeouts."
                 (while (< pos end)
                   (setq pieces
                         (llm-test--append-events before-table pos pieces))
-                  (let ((display-data
-                         (llm-test--display-overlay-at overlays pos)))
-                    (if display-data
-                        (progn
-                          (push (nth 2 display-data) pieces)
-                          (setq pos (nth 1 display-data))
+                  (let ((display-state
+                         (llm-test--display-state-at pos end)))
+                    (if display-state
+                        (let* ((display (car display-state))
+                               (next-pos
+                                (llm-test--next-display-change
+                                 pos end display-state)))
+                          (push display pieces)
+                          (setq pos next-pos)
                           (setq pieces
                                 (llm-test--append-events
                                  after-table pos pieces)))
-                      (push (buffer-substring-no-properties pos (1+ pos))
-                            pieces)
-                      (setq pos (1+ pos))
-                      (setq pieces
-                            (llm-test--append-events
-                             after-table pos pieces)))))
+                      (let ((next-pos
+                             (llm-test--next-boundary pos end)))
+                        (push (buffer-substring-no-properties pos next-pos)
+                              pieces)
+                        (setq pos next-pos)
+                        (setq pieces
+                              (llm-test--append-events
+                               after-table pos pieces))))))
                 (setq pieces
                       (llm-test--append-events before-table pos pieces))
                 (apply #'concat (nreverse pieces))))))
