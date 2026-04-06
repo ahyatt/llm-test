@@ -777,12 +777,13 @@ Do not inspect keymaps, run describe-mode/describe-function, or open help \
 buffers unless the test explicitly asks for that or the instructed action has \
 already failed more than once.
 - The frame state is the authoritative, exact view of the buffer contents.  The \
-\"lines\" array contains the precise text in the buffer — it is not a summary \
-or approximation.  Use it to verify buffer contents, text, wrapping, and \
-layout.  Do NOT call eval-elisp to re-read or double-check buffer text that is \
-already visible in the frame state.  Only use eval-elisp to check things that \
-are not represented in the frame state (e.g. text properties, variable values, \
-or buffer-local state).
+\"lines\" array contains the precise, complete text in the buffer with no \
+hidden characters, no missing whitespace, and no truncation — it is exactly \
+equivalent to what buffer-string would return.  Use it to verify buffer \
+contents, text, wrapping, and layout.  Do NOT call eval-elisp to re-read or \
+double-check buffer text that is already visible in the frame state.  Only use \
+eval-elisp to check things that are not represented in the frame state (e.g. \
+text properties, variable values, or buffer-local state).
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
 - Never try to mock or simulating anything that isn't working.  If you get a \
