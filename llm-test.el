@@ -6,7 +6,7 @@
 ;; Homepage: https://github.com/ahyatt/llm-test
 ;; Package-Requires: ((emacs "29.1") (llm "0.18.0") (yaml "0.5.0") (futur "1.2"))
 ;; Keywords: testing, tools
-;; Version: 0.2.0
+;; Version: 0.2.1
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
 ;; This program is free software; you can redistribute it and/or
@@ -31,7 +31,7 @@
 ;; Usage:
 ;;   (require 'llm-test)
 ;;   (setq llm-test-provider (make-llm-openai :key "..."))
-;;   ;; or set LLM_TEST_PROVIDER_ELISP in the environment
+;;   ;; or set LLM_TEST_DEBUG=file LLM_TEST_PROVIDER_ELISP in the environment
 ;;   (llm-test-register-tests "path/to/testscripts/")
 
 ;;; Code:
@@ -47,10 +47,12 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'futur)
+(require 'json)
 
 (defgroup llm-test nil
   "LLM-driven testing for Emacs packages."
   :group 'tools)
+
 (defcustom llm-test-emacs-executable "emacs"
   "Path to the Emacs executable used to run tests.
 A fresh Emacs process (`emacs -Q') is launched for each test."
@@ -196,6 +198,9 @@ plist with :process, :server-name, :socket-dir, and :init-file."
          (_ (with-temp-file init-file
               (insert (format "(setq server-socket-dir %S server-name %S)\n"
                               socket-dir server-name))
+              ;; Disable native compilation to avoid noise in tests.
+              (insert "(setq native-comp-deferred-compilation nil)\n")
+              (insert llm-test--frame-state-helper-elisp "\n")
               (dolist (dir extra-load-path)
                 (insert (format "(add-to-list 'load-path %S)\n" dir)))
               (dolist (form init-forms)
@@ -300,9 +305,56 @@ does not block the Emacs event loop."
   :group 'llm-test)
 
 (defcustom llm-test-debug nil
-  "When non-nil, log each tool call and its result to *Messages*."
-  :type 'boolean
+  "When non-nil, log each tool call and its result.
+If set to t, logs to *Messages*.
+If set to 'file, logs to a temporary file and prints its location.
+If nil, check `llm-test-debug-environment-variable'."
+  :type '(choice (const :tag "Off" nil)
+                 (const :tag "Messages" t)
+                 (const :tag "Temporary file" file))
   :group 'llm-test)
+
+(defcustom llm-test-debug-environment-variable "LLM_TEST_DEBUG"
+  "Environment variable to check for debug mode when `llm-test-debug` is nil.
+If the variable is set to \"file\", logs to a temporary file.
+If set to any other non-empty value, logs to *Messages*."
+  :type 'string
+  :group 'llm-test)
+
+(defun llm-test--resolve-debug ()
+  "Resolve the debug mode from `llm-test-debug` or the environment."
+  (or llm-test-debug
+      (let ((env-val (getenv llm-test-debug-environment-variable)))
+        (cond
+         ((null env-val) nil)
+         ((string= env-val "file") 'file)
+         ((not (string= env-val "")) t)
+         (t nil)))))
+
+
+(defvar llm-test--current-debug-file nil
+  "The file where debug logs are currently being written.")
+
+(defvar llm-test--start-time nil
+  "The `float-time' when the current test started, for elapsed timestamps.")
+
+(defun llm-test--log (format-string &rest args)
+  "Log FORMAT-STRING with ARGS, based on `llm-test-debug' or environment.
+Each line is prefixed with the elapsed time since `llm-test--start-time'."
+  (let* ((debug (llm-test--resolve-debug))
+         (elapsed (if llm-test--start-time
+                      (- (float-time) llm-test--start-time)
+                    0.0))
+         (raw (apply #'format format-string args))
+         (prefix (format "[+%.1fs] " elapsed))
+         (msg (concat prefix raw)))
+    (when debug
+      (message "llm-test: %s" msg))
+    (when llm-test--current-debug-file
+      (with-temp-buffer
+        (insert msg)
+        (newline)
+        (append-to-file (point-min) (point-max) llm-test--current-debug-file)))))
 
 (defcustom llm-test-max-tool-result-length 2000
   "Maximum character length for a tool result returned to the LLM.
@@ -312,153 +364,174 @@ conversation context and causing API timeouts."
   :type 'integer
   :group 'llm-test)
 
-(defconst llm-test--frame-state-elisp
-  "(progn
-     (require 'cl-lib)
-     (require 'json)
-     (redisplay t)
-     (cl-labels
-         ((llm-test--plain-string (value)
-            (cond
-             ((stringp value) (substring-no-properties value))
-             ((and (consp value) (stringp (car value)))
-              (substring-no-properties (car value)))
-             (t nil)))
-          (llm-test--display-replacement (value)
-            (cond
-             ((null value) nil)
-             ((llm-test--plain-string value))
-             (t \"[display]\")))
-          (llm-test--add-event (table pos string)
-            (when (and string pos)
-              (puthash pos (append (gethash pos table) (list string)) table)))
-          (llm-test--append-events (table pos pieces)
-            (dolist (string (gethash pos table))
-              (push string pieces))
-            pieces)
-          (llm-test--display-state-at (pos end)
-            (let* ((display-data (get-char-property-and-overlay pos 'display))
-                   (overlay (cdr display-data))
-                   (display (llm-test--display-replacement
-                             (car display-data)))
-                   (display-end
-                    (if overlay
-                        (overlay-end overlay)
-                      (next-single-char-property-change
-                       pos 'display nil end))))
-              (when display
-                (list display overlay display-end))))
-          (llm-test--next-boundary (pos end)
-            (min end
-                 (next-overlay-change pos)
-                 (next-single-char-property-change pos 'display nil end)))
-          (llm-test--next-display-change (pos end active-state)
-            (let ((next (llm-test--next-boundary pos end)))
-              (while (and (< next end)
-                          (equal (llm-test--display-state-at next end)
-                                 active-state))
-                (setq next (llm-test--next-boundary next end)))
-              next))
-          (llm-test--window-contents (w)
-            (with-current-buffer (window-buffer w)
-              (let* ((start (window-start w))
-                     (end (window-end w t))
-                     (overlays (cl-remove-duplicates
-                                (append (overlays-in start end)
-                                        (overlays-at start)
-                                        (overlays-at end))
-                                :test #'eq))
-                     (before-table (make-hash-table :test #'eql))
-                     (after-table (make-hash-table :test #'eql))
-                     (pieces nil)
-                     (pos start))
-                (dolist (ov overlays)
-                  (let* ((ov-start (overlay-start ov))
-                         (ov-end (overlay-end ov))
-                         (before
-                          (llm-test--plain-string
-                           (overlay-get ov 'before-string)))
-                         (after
-                          (llm-test--plain-string
-                           (overlay-get ov 'after-string)))
-                         (display
-                          (llm-test--display-replacement
-                           (overlay-get ov 'display))))
-                    (when (and before ov-start
-                               (<= start ov-start) (<= ov-start end))
-                      (llm-test--add-event before-table ov-start before))
-                    (when (and display ov-start ov-end (= ov-start ov-end)
-                               (<= start ov-start) (<= ov-start end))
-                      (llm-test--add-event before-table ov-start display))
-                    (when (and after ov-end
-                               (<= start ov-end) (<= ov-end end))
-                      (llm-test--add-event
-                       (if (and ov-start (= ov-start ov-end))
-                           before-table
-                         after-table)
-                       ov-end
-                       after))))
-                (while (< pos end)
-                  (setq pieces
-                        (llm-test--append-events before-table pos pieces))
-                  (let ((display-state
-                         (llm-test--display-state-at pos end)))
-                    (if display-state
-                        (let* ((display (car display-state))
-                               (next-pos
-                                (llm-test--next-display-change
-                                 pos end display-state)))
-                          (push display pieces)
-                          (setq pos next-pos)
-                          (setq pieces
-                                (llm-test--append-events
-                                 after-table pos pieces)))
-                      (let ((next-pos
-                             (llm-test--next-boundary pos end)))
-                        (push (buffer-substring-no-properties pos next-pos)
-                              pieces)
-                        (setq pos next-pos)
-                        (setq pieces
-                              (llm-test--append-events
-                               after-table pos pieces))))))
+(defconst llm-test--frame-state-helper-elisp
+  "(require 'cl-lib)
+(require 'json)
+
+(defun llm-test--plain-string (value)
+  (cond
+   ((stringp value) (substring-no-properties value))
+   ((and (consp value) (stringp (car value)))
+    (substring-no-properties (car value)))
+   (t nil)))
+
+(defun llm-test--display-replacement (value)
+  (cond
+   ((null value) nil)
+   ((llm-test--plain-string value))
+   (t \"[display]\")))
+
+(defun llm-test--add-event (table pos string)
+  (when (and string pos)
+    (puthash pos (append (gethash pos table) (list string)) table)))
+
+(defun llm-test--append-events (table pos pieces)
+  (dolist (string (gethash pos table))
+    (push string pieces))
+  pieces)
+
+(defun llm-test--display-state-at (pos end)
+  (let* ((display-data (get-char-property-and-overlay pos 'display))
+         (overlay (cdr display-data))
+         (display (llm-test--display-replacement
+                   (car display-data)))
+         (display-end
+          (if overlay
+              (overlay-end overlay)
+            (next-single-char-property-change
+             pos 'display nil end))))
+    (when display
+      (list display overlay display-end))))
+
+(defun llm-test--next-boundary (pos end)
+  (min end
+       (next-overlay-change pos)
+       (next-single-char-property-change pos 'display nil end)))
+
+(defun llm-test--next-display-change (pos end active-state)
+  (let ((next (llm-test--next-boundary pos end)))
+    (while (and (< next end)
+                (equal (llm-test--display-state-at next end)
+                       active-state))
+      (setq next (llm-test--next-boundary next end)))
+    next))
+
+(defun llm-test--window-contents-range (w start-pos end-pos)
+  (with-current-buffer (window-buffer w)
+    (let* ((overlays (cl-remove-duplicates
+                      (append (overlays-in start-pos end-pos)
+                              (overlays-at start-pos)
+                              (overlays-at end-pos))
+                      :test #'eq))
+           (before-table (make-hash-table :test #'eql))
+           (after-table (make-hash-table :test #'eql))
+           (pieces nil)
+           (pos start-pos))
+      (dolist (ov overlays)
+        (let* ((ov-start (overlay-start ov))
+               (ov-end (overlay-end ov))
+               (before
+                (llm-test--plain-string
+                 (overlay-get ov 'before-string)))
+               (after
+                (llm-test--plain-string
+                 (overlay-get ov 'after-string)))
+               (display
+                (llm-test--display-replacement
+                 (overlay-get ov 'display))))
+          (when (and before ov-start
+                     (<= start-pos ov-start) (<= ov-start end-pos))
+            (llm-test--add-event before-table ov-start before))
+          (when (and display ov-start ov-end (= ov-start ov-end)
+                     (<= start-pos ov-start) (<= ov-start end-pos))
+            (llm-test--add-event before-table ov-start display))
+          (when (and after ov-end
+                     (<= start-pos ov-end) (<= ov-end end-pos))
+            (llm-test--add-event
+             (if (and ov-start (= ov-start ov-end))
+                 before-table
+               after-table)
+             ov-end
+             after))))
+      (while (< pos end-pos)
+        (setq pieces
+              (llm-test--append-events before-table pos pieces))
+        (let ((display-state
+               (llm-test--display-state-at pos end-pos)))
+          (if display-state
+              (let* ((display (car display-state))
+                     (next-pos
+                      (llm-test--next-display-change
+                       pos end-pos display-state)))
+                (push display pieces)
+                (setq pos next-pos)
                 (setq pieces
-                      (llm-test--append-events before-table pos pieces))
-                (apply #'concat (nreverse pieces))))))
-       (let* ((wins (window-list nil 'no-minibuf))
-              (parts nil))
-         (dolist (w wins)
-           (let* ((buf (window-buffer w))
-                  (name (buffer-name buf))
-                  (sel (eq w (selected-window)))
-                  (contents (llm-test--window-contents w))
-                  (mode (with-current-buffer buf
-                          (symbol-name major-mode)))
-                  (pt (with-current-buffer buf
-                        (point))))
-             (push (format
-                    \"{\\\"buffer\\\": %s, \\\"mode\\\": %s, \\\"selected\\\": %s, \\\"point\\\": %d, \\\"contents\\\": %s}\"
-                    (json-encode-string name)
-                    (json-encode-string mode)
-                    (if sel \"true\" \"false\")
-                    pt
-                    (json-encode-string contents))
-                   parts)))
-         (let ((mini (if (active-minibuffer-window)
-                         (with-current-buffer
-                             (window-buffer (active-minibuffer-window))
-                           (format
-                            \"{\\\"active\\\": true, \\\"prompt\\\": %s, \\\"input\\\": %s}\"
-                            (json-encode-string (or (minibuffer-prompt) \"\"))
-                            (json-encode-string
-                             (minibuffer-contents-no-properties))))
-                       \"{\\\"active\\\": false}\")))
-           (format \"{\\\"windows\\\": [%s], \\\"minibuffer\\\": %s}\"
-                   (mapconcat #'identity (nreverse parts) \", \")
-                   mini)))))"
+                      (llm-test--append-events
+                       after-table pos pieces)))
+            (let ((next-pos
+                   (llm-test--next-boundary pos end-pos)))
+              (push (buffer-substring-no-properties pos next-pos)
+                    pieces)
+              (setq pos next-pos)
+              (setq pieces
+                    (llm-test--append-events
+                     after-table pos pieces))))))
+      (setq pieces
+            (llm-test--append-events before-table pos pieces))
+      (apply #'concat (nreverse pieces)))))
+
+(defun llm-test--window-lines (w)
+  (with-current-buffer (window-buffer w)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let* ((start (window-start w))
+               (end (window-end w t))
+               (lines nil))
+          (goto-char start)
+          (while (< (point) end)
+            (let ((line-start (point)))
+              (vertical-motion 1 w)
+              (let ((line-end (point)))
+                (if (<= line-end line-start)
+                    (goto-char end) ; avoid infinite loop
+                  (push (llm-test--window-contents-range w line-start line-end)
+                        lines)))))
+          (nreverse lines))))))
+
+(defun llm-test--capture-frame-state ()
+  (redisplay t)
+  (let* ((wins (window-list nil 'no-minibuf))
+         (windows (make-vector 0 nil)))
+    (dolist (w wins)
+      (let* ((buf (window-buffer w))
+             (name (buffer-name buf)))
+        (unless (string= name \"*Warnings*\")
+          (setq windows
+                (vconcat windows
+                         (list
+                          (list :buffer name
+                                :mode (with-current-buffer buf (symbol-name major-mode))
+                                :selected (eq w (selected-window))
+                                :point (with-current-buffer buf (point))
+                                :lines (apply #'vector (llm-test--window-lines w)))))))))
+    (let ((mini-win (active-minibuffer-window)))
+      (json-encode
+       (list :windows windows
+             :minibuffer (if mini-win
+                             (with-current-buffer (window-buffer mini-win)
+                               (list :active t
+                                     :prompt (or (minibuffer-prompt) \"\")
+                                     :input (minibuffer-contents-no-properties)))
+                           (list :active nil)))))))"
+  "Elisp code to be loaded in the test Emacs to support frame state capture.")
+
+(defconst llm-test--frame-state-elisp
+  "(llm-test--capture-frame-state)"
   "Elisp expression that captures the full frame state as a JSON string.
 Returns a JSON object with `windows' (array of window objects each
-having buffer, mode, selected, point, contents) and `minibuffer'
-\(object with active, and optionally prompt and input).")
+having buffer, mode, selected, point, lines) and `minibuffer'
+(object with active, and optionally prompt and input).")
 
 (defun llm-test--capture-frame-state-async (emacs-info)
   "Capture the current frame state of the test Emacs as a JSON string.
@@ -466,7 +539,8 @@ EMACS-INFO is the plist from `llm-test--start-emacs'.
 Returns a futur that resolves to the JSON string."
   (futur-bind
    (llm-test--eval-in-emacs-async emacs-info llm-test--frame-state-elisp)
-   #'futur-done
+   (lambda (result)
+     (futur-done (condition-case nil (read result) (error result))))
    (lambda (err)
      (futur-done (format "{\"error\": \"%s\"}" err)))))
 
@@ -478,6 +552,17 @@ Returns a futur that resolves to the JSON string."
               "\n... [truncated]")
     result))
 
+(defun llm-test--pretty-json (value)
+  "Pretty-print VALUE as JSON.
+VALUE may be a JSON string or an already-parsed Elisp object."
+  (condition-case nil
+      (let ((json-encoding-pretty-print t)
+            (parsed (if (stringp value)
+                        (json-read-from-string value)
+                      value)))
+        (json-encode parsed))
+    (error (format "%S" value))))
+
 (defun llm-test--wrap-tool-fn (name fn emacs-info)
   "Wrap tool function FN with debug logging, truncation, and frame state.
 NAME is the tool name for logging.  EMACS-INFO is the subprocess plist
@@ -486,29 +571,31 @@ FN is an async tool function that takes a callback as its first argument.
 The returned wrapper is also async (takes callback as first arg)."
   (lambda (callback &rest args)
     (let ((start-time (float-time)))
-      (when llm-test-debug
-        (message "llm-test tool %s called with: %S" name args))
+      (llm-test--log "[Tool Call: %s]\n  Args: %S" name args)
       (apply fn
              (lambda (raw-result)
-               (when llm-test-debug
-                 (message "llm-test tool %s returned in %.3fs: %s"
-                          name
-                          (- (float-time) start-time)
-                          (truncate-string-to-width
-                           (format "%S" raw-result) 200)))
+               (llm-test--log "[Tool Result: %s (%.1fs)]\n  Result: %s"
+                              name
+                              (- (float-time) start-time)
+                              (truncate-string-to-width
+                               (format "%s" raw-result) 500))
                (futur-bind
                 (llm-test--capture-frame-state-async emacs-info)
                 (lambda (frame-state)
-                  (let ((result
-                         (llm-test--truncate-result
-                          (format "%s\n\nFrame state:\n%s"
-                                  raw-result frame-state))))
-                    (when llm-test-debug
-                      (message "llm-test tool %s frame-state captured in %.3fs"
-                               name
-                               (- (float-time) start-time)))
+                  (let* ((pretty-state (llm-test--pretty-json frame-state))
+                         (result
+                          (llm-test--truncate-result
+                           (format "%s\n\nFrame state:\n%s"
+                                   raw-result frame-state))))
+                    (llm-test--log "[Frame State after %s]\n%s"
+                                   name pretty-state)
                     (funcall callback result)
-                    (futur-done nil)))))
+                    (futur-done nil)))
+                (lambda (err)
+                  (llm-test--log "[Frame State FAILED for %s]: %S"
+                                 name err)
+                  (funcall callback raw-result)
+                  (futur-done nil))))
              args))))
 
 (defun llm-test--make-tools (emacs-info suggestions)
@@ -519,20 +606,40 @@ improvement suggestions from the agent."
   (list
    (make-llm-tool
     :function (lambda (callback code)
+                (let ((wrapped (format "(with-current-buffer (window-buffer (selected-window)) %s)" code)))
+                  (futur-bind
+                   (llm-test--eval-in-emacs-async emacs-info wrapped)
+                   (lambda (result)
+                     (funcall callback result)
+                     (futur-done nil))
+                   (lambda (err)
+                     (funcall callback
+                              (format "ERROR: %s" err))
+                     (futur-done nil)))))
+    :name "eval-elisp"
+    :async t
+    :description "Evaluate an Emacs Lisp expression in the test Emacs process and return the printed result.
+The expression is evaluated in the context of the currently selected window's buffer."
+    :args (list (list :name "code" :type 'string
+                      :description "The Emacs Lisp expression to evaluate, as a string.")))
+
+   (make-llm-tool
+    :function (lambda (callback text)
                 (futur-bind
-                 (llm-test--eval-in-emacs-async emacs-info code)
+                 (llm-test--eval-in-emacs-async
+                  emacs-info
+                  (format "(with-current-buffer (window-buffer (selected-window)) (insert %S) \"Text inserted\")" text))
                  (lambda (result)
                    (funcall callback result)
                    (futur-done nil))
                  (lambda (err)
-                   (funcall callback
-                            (format "ERROR: %s" err))
+                   (funcall callback (format "ERROR: %s" err))
                    (futur-done nil))))
-    :name "eval-elisp"
+    :name "type-text"
     :async t
-    :description "Evaluate an Emacs Lisp expression in the test Emacs process and return the printed result."
-    :args (list (list :name "code" :type 'string
-                      :description "The Emacs Lisp expression to evaluate, as a string.")))
+    :description "Type literal text into the current buffer at point. Use this for entering paragraphs, sentences, or any strings where spaces and characters should be preserved exactly as-is."
+    :args (list (list :name "text" :type 'string
+                      :description "The literal text to type.")))
 
    (make-llm-tool
     :function (lambda (callback keys)
@@ -558,6 +665,8 @@ improvement suggestions from the agent."
     :async t
     :description "Send a key sequence to the test Emacs, as if typed by a user.
 Use Emacs key notation (e.g. \"C-x C-f\", \"M-x\", \"RET\").
+
+IMPORTANT: Literal spaces in the input string are ignored by the key parser. Use 'SPC' to type a space (e.g. \"H e l l o SPC w o r l d\"). For typing long strings of text, use the 'type-text' tool instead.
 
 This is non-blocking: it queues the keys and returns immediately.
 The keys are processed by the Emacs command loop after this call
@@ -595,7 +704,7 @@ this zero or more times during a test."
     :async t
     :description "Signal that the current test has PASSED.  Call this when you have verified the expected outcome."
     :args (list (list :name "reason" :type 'string
-                      :description "Explanation of why the test passed.")))
+                      :description "Explanation of why the test failed.")))
 
    (make-llm-tool
     :function (lambda (callback reason)
@@ -631,7 +740,7 @@ JSON snapshot of the entire Emacs frame.  The JSON has this structure:
       \"mode\": \"<major mode>\",
       \"selected\": true/false,
       \"point\": <integer>,
-      \"contents\": \"<visible text in window>\"
+      \"lines\": [\"<visual line 1>\", \"<visual line 2>\", ...]
     }
   ],
   \"minibuffer\": {
@@ -641,22 +750,19 @@ JSON snapshot of the entire Emacs frame.  The JSON has this structure:
   }
 }
 
-The window contents show only what is visible on screen (like a human looking \
-at the Emacs frame), not the full buffer.  Use send-keys to scroll (e.g. \
-\"C-v\" / \"M-v\") and then call any tool to get an updated frame state.
-
-Your workflow:
-1. Read the setup instructions and execute them using eval-elisp or send-keys.
-2. Read the test description and perform the actions described.
-3. After performing the actions, verify the expected outcome using the frame \
-state and/or eval-elisp.
-4. Call pass-test if the outcome matches expectations, or fail-test if it \
-does not.
+The window \"lines\" field is an array of strings, each representing a single \
+visual line on the screen.  If a long line of text is wrapped by Emacs \
+(e.g. via visual-line-mode or auto-fill-mode), it will appear as multiple \
+entries in the \"lines\" array.  This represents exactly what a human \
+looking at the Emacs frame would see.
 
 Important rules:
 - Always call exactly one of pass-test or fail-test before finishing.
 - Use eval-elisp for programmatic operations and state inspection.
-- Use send-keys when the test requires simulating interactive user input.
+- Use type-text for typing strings of text (sentences, paragraphs) into the \
+buffer. This preserves spaces.
+- Use send-keys for simulated interactive input like M-x, RET, or command \
+keybindings. Note: literal spaces in send-keys are ignored; use 'SPC' if needed.
 - send-keys is non-blocking: the keys may not be processed before the frame \
 state is captured.  Call eval-elisp with \"t\" if you need a fresh snapshot.
 - Do not batch send-keys across UI state transitions such as opening the \
@@ -670,14 +776,25 @@ key.
 Do not inspect keymaps, run describe-mode/describe-function, or open help \
 buffers unless the test explicitly asks for that or the instructed action has \
 already failed more than once.
-- eval-elisp runs in a neutral evaluation context, not necessarily the selected \
-window's buffer.  Use with-current-buffer when checking buffer-local state.
+- The frame state is the authoritative, exact view of the buffer contents.  The \
+\"lines\" array contains the precise text in the buffer — it is not a summary \
+or approximation.  Use it to verify buffer contents, text, wrapping, and \
+layout.  Do NOT call eval-elisp to re-read or double-check buffer text that is \
+already visible in the frame state.  Only use eval-elisp to check things that \
+are not represented in the frame state (e.g. text properties, variable values, \
+or buffer-local state).
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
 - Never try to mock or simulating anything that isn't working.  If you get a \
 failure, let it fail without trying to work around it.
 - Be efficient: prefer performing the requested action and checking the result \
-over exploratory introspection.
+over exploratory introspection.  After performing an action, check the frame \
+state that came back — if it already confirms the expected outcome, you MUST \
+call pass-test or fail-test immediately in the same turn without making any \
+additional tool calls.  The concatenation of all strings in the \"lines\" array \
+is equivalent to calling buffer-string — never call buffer-string, \
+buffer-substring, or similar functions to re-read text that is already in the \
+frame state.
 - If you seem blocked after one or two reasonable recovery attempts, call \
 fail-test with the blocker instead of continuing to probe indefinitely.
 - Be thorough: verify the actual state, don't assume operations succeeded.
@@ -706,40 +823,50 @@ iteration limit."
                 :suggestions (cdr suggestions)))
     (let ((start-time (float-time))
           (llm-warn-on-nonfree nil))
-      (when llm-test-debug
-        (message "llm-test iteration %d: calling llm-chat-async" iteration))
+      (llm-test--log "\n========== Iteration %d ==========" iteration)
+      (when (= iteration 1)
+        (let* ((interactions (llm-chat-prompt-interactions prompt))
+               (user-msg (llm-chat-prompt-interaction-content (car interactions))))
+          (llm-test--log "[User Message]\n%s" user-msg)))
+      (llm-test--log "[Calling LLM...]")
       (llm-chat-async
        provider prompt
        (lambda (result)
-         (when llm-test-debug
-           (message "llm-test iteration %d: got response in %.3fs, tool-results=%S"
-                    iteration
-                    (- (float-time) start-time)
-                    (and (plistp result)
-                         (plist-get result :tool-results))))
-         (let* ((tool-results (plist-get result :tool-results))
-                ;; TODO: The tool identifier may come back as strings or symbols.  The
-                ;; underlying cause of this needs to be fixed.
-                (pass-result (or (assoc-default "pass-test" tool-results) (assoc-default 'pass-test tool-results)))
-                (fail-result (or (assoc-default "fail-test" tool-results) (assoc-default 'fail-test tool-results))))
-           (cond
-            (pass-result
-             (funcall callback
-                      (make-llm-test-result :passed-p t :reason pass-result
-                                            :suggestions (cdr suggestions))))
-            (fail-result
-             (funcall callback
-                      (make-llm-test-result :passed-p nil :reason fail-result
-                                            :suggestions (cdr suggestions))))
-            (t
-             (llm-test--run-test-async provider prompt (1+ iteration)
-                                       suggestions callback)))))
+         (let ((reasoning (if (plistp result) (plist-get result :reasoning) nil))
+               (text (if (plistp result) (plist-get result :text) result))
+               (tool-results (if (plistp result) (plist-get result :tool-results) nil)))
+           (llm-test--log "[LLM Response (%.1fs)]"
+                          (- (float-time) start-time))
+           (when reasoning
+             (llm-test--log "[Agent Reasoning]\n%s" reasoning))
+           (when (and text (not (equal text "")))
+             (llm-test--log "[Agent Text]\n%s" text))
+           (when tool-results
+             (llm-test--log "[Tool Results Summary]\n  %s"
+                            (mapconcat (lambda (tr) (format "%s" (car tr)))
+                                       tool-results ", ")))
+           (let* (;; TODO: The tool identifier may come back as strings or symbols.  The
+                  ;; underlying cause of this needs to be fixed.
+                  (pass-result (assoc-default "pass-test" tool-results))
+                  (fail-result (assoc-default "fail-test" tool-results)))
+             (cond
+              (pass-result
+               (llm-test--log "\n========== PASS ==========\n  %s" pass-result)
+               (funcall callback
+                        (make-llm-test-result :passed-p t :reason pass-result
+                                              :suggestions (cdr suggestions))))
+              (fail-result
+               (llm-test--log "\n========== FAIL ==========\n  %s" fail-result)
+               (funcall callback
+                        (make-llm-test-result :passed-p nil :reason fail-result
+                                              :suggestions (cdr suggestions))))
+              (t
+               (llm-test--run-test-async provider prompt (1+ iteration)
+                                         suggestions callback))))))
        (lambda (_ err)
-         (when llm-test-debug
-           (message "llm-test iteration %d: LLM error after %.3fs: %s"
-                    iteration
-                    (- (float-time) start-time)
-                    err))
+         (llm-test--log "[LLM Error (%.1fs)]: %s"
+                        (- (float-time) start-time)
+                        err)
          (funcall callback
                   (make-llm-test-result
                    :passed-p nil
@@ -753,10 +880,11 @@ GROUP-SETUP is the setup string for the test group.
 TEST-SPEC is an `llm-test-spec' struct.
 Returns an `llm-test-result'.  Processes async events while waiting
 so that Emacs remains responsive."
-  (let* ((user-message
-          (format "Setup instructions:\n%s\n\nTest to execute:\n%s"
-                  group-setup
-                  (llm-test-spec-description test-spec)))
+  (let* ((debug-file (when (eq (llm-test--resolve-debug) 'file)
+                       (make-temp-file (expand-file-name "llm-test-debug-" default-directory) nil ".log")))
+         (user-message (format "Setup instructions:\n%s\n\nTest to execute:\n%s"
+                               group-setup
+                               (llm-test-spec-description test-spec)))
          (suggestions (list nil))
          (tools (llm-test--apply-tool-wrapping
                  (llm-test--make-tools emacs-info suggestions)
@@ -768,6 +896,14 @@ so that Emacs remains responsive."
                     :tools tools)))
          (done nil)
          (final-result nil))
+    ;; Set global variables so async callbacks (process filters) can see them.
+    (setq llm-test--current-debug-file debug-file
+          llm-test--start-time (float-time))
+    (when debug-file
+      (message "llm-test debug log: %s" (expand-file-name debug-file)))
+    (llm-test--log "======================================")
+    (llm-test--log "Test: %s" (llm-test-spec-description test-spec))
+    (llm-test--log "======================================")
     (llm-test--run-test-async
      provider prompt 1 suggestions
      (lambda (result)
@@ -777,6 +913,8 @@ so that Emacs remains responsive."
       ;; Process all events (user input, redisplay, timers, subprocess
       ;; I/O) so that Emacs remains responsive during the test.
       (sit-for 0.1))
+    (setq llm-test--current-debug-file nil
+          llm-test--start-time nil)
     final-result))
 
 ;;; Test Loading

@@ -7,3 +7,4 @@ tests:
       Type a long paragraph that exceeds fill-column.
       Verify that the text is automatically wrapped at exactly column 10.
     expected-failure: true
+    

@@ -128,6 +128,38 @@
     (should (llm-test-spec-expected-failure (nth 0 (llm-test-group-tests groups))))
     (should-not (llm-test-spec-expected-failure (nth 1 (llm-test-group-tests groups))))))
 
+(ert-deftest llm-test-log-to-messages ()
+  "Logging with llm-test-debug = t should call message."
+  (let ((llm-test-debug t)
+        (messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages))))
+      (llm-test--log "hello %s" "world")
+      (should (member "llm-test: hello world" messages)))))
+
+(ert-deftest llm-test-log-to-file ()
+  "Logging with llm-test--current-debug-file should write to file."
+  (let ((temp-file (make-temp-file "llm-test-test-log-")))
+    (unwind-protect
+        (let ((llm-test--current-debug-file temp-file))
+          (llm-test--log "hello %s" "file")
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (should (string-match-p "hello file\n" (buffer-string)))))
+      (delete-file temp-file))))
+
+(ert-deftest llm-test-resolve-debug-env ()
+  "Resolving debug should check the environment."
+  (let ((llm-test-debug nil)
+        (llm-test-debug-environment-variable "LLM_TEST_DEBUG_TEST"))
+    (setenv "LLM_TEST_DEBUG_TEST" "file")
+    (should (eq (llm-test--resolve-debug) 'file))
+    (setenv "LLM_TEST_DEBUG_TEST" "1")
+    (should (eq (llm-test--resolve-debug) t))
+    (setenv "LLM_TEST_DEBUG_TEST" nil)
+    (should-not (llm-test--resolve-debug))))
+
 (ert-deftest llm-test-slugify ()
   "Slugify should produce clean symbol names."
   (should (eq (llm-test--slugify "auto-fill mode") 'auto-fill-mode))

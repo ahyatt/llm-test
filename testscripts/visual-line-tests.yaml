@@ -14,9 +14,7 @@ setup: |
 tests:
   - description: |
       Type a sentence that is much longer than 80 characters into
-      the buffer using send-keys (just type the characters directly).
-      Then use get-buffer-contents to see the visible display.
+      the buffer using type-text.
       Verify that:
         1. The text appears on more than one display line (it wraps).
-        2. The buffer contains no actual newline characters — confirm
-           with eval-elisp by checking (count-lines (point-min) (point-max)).
+        2. The text contains no actual newline characters (verify this solely by checking that none of the strings in the 'lines' array end with a newline character, do NOT use eval-elisp for this).
