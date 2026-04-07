@@ -18,15 +18,19 @@
               windows)))
 
 (defun llm-test-test--selected-window-contents (info)
-  "Return the visible contents of the selected window from INFO's frame state."
+  "Return the visible contents of the selected window from INFO's frame state.
+The frame state JSON stores visual lines as a \"lines\" array; this
+function concatenates them into a single string."
   (let ((state (json-parse-string
                 (read (llm-test--eval-in-emacs info
                                                llm-test--frame-state-elisp))
                 :object-type 'alist
                 :array-type 'list)))
-    (alist-get "contents"
-               (llm-test-test--selected-window state)
-               nil nil #'string=)))
+    (let ((lines (alist-get "lines"
+                            (llm-test-test--selected-window state)
+                            nil nil #'string=)))
+      (when lines
+        (mapconcat #'identity lines "")))))
 
 (defun llm-test-test--testscripts-directory ()
   "Return the absolute path to the sample YAML test scripts."
@@ -128,6 +132,39 @@
     (should (llm-test-spec-expected-failure (nth 0 (llm-test-group-tests groups))))
     (should-not (llm-test-spec-expected-failure (nth 1 (llm-test-group-tests groups))))))
 
+(ert-deftest llm-test-log-to-messages ()
+  "Logging with llm-test-debug = t should call message."
+  (let ((llm-test-debug t)
+        (messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages))))
+      (llm-test--log "hello %s" "world")
+      (should (cl-some (lambda (m) (string-match-p "llm-test: \\[\\+[0-9.]+s\\] hello world" m))
+                       messages)))))
+
+(ert-deftest llm-test-log-to-file ()
+  "Logging with llm-test--current-debug-file should write to file."
+  (let ((temp-file (make-temp-file "llm-test-test-log-")))
+    (unwind-protect
+        (let ((llm-test--current-debug-file temp-file))
+          (llm-test--log "hello %s" "file")
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (should (string-match-p "hello file\n" (buffer-string)))))
+      (delete-file temp-file))))
+
+(ert-deftest llm-test-resolve-debug-env ()
+  "Resolving debug should check the environment."
+  (let ((llm-test-debug nil)
+        (llm-test-debug-environment-variable "LLM_TEST_DEBUG_TEST"))
+    (setenv "LLM_TEST_DEBUG_TEST" "file")
+    (should (eq (llm-test--resolve-debug) 'file))
+    (setenv "LLM_TEST_DEBUG_TEST" "1")
+    (should (eq (llm-test--resolve-debug) t))
+    (setenv "LLM_TEST_DEBUG_TEST" nil)
+    (should-not (llm-test--resolve-debug))))
+
 (ert-deftest llm-test-slugify ()
   "Slugify should produce clean symbol names."
   (should (eq (llm-test--slugify "auto-fill mode") 'auto-fill-mode))
@@ -186,9 +223,9 @@
                 (visible (llm-test-test--selected-window-contents info)))
             (should (= total-lines 100))
             ;; Visible content should be non-empty and no longer than the buffer.
-            (let ((visible-lines (length (split-string visible "\n" t))))
-              (should (<= visible-lines 100))
-              (should (> visible-lines 0)))))
+            (should visible)
+            (should (> (length visible) 0))
+            (should (<= (length (split-string visible "\n" t)) 100))))
       (llm-test--stop-emacs info))))
 
 (ert-deftest llm-test-visible-buffer-contents-include-overlay-after-string ()
@@ -382,10 +419,10 @@
 (ert-deftest llm-test-suggestions-accumulate ()
   "The suggest-improvement tool should accumulate suggestions."
   (let* ((suggestions (list nil))
-         (tool (nth 2 (llm-test--make-tools
+         (tool (nth 3 (llm-test--make-tools
                        '(:server-name "x" :socket-dir "/tmp")
                        suggestions))))
-    ;; The suggest-improvement tool is at index 2.
+    ;; The suggest-improvement tool is at index 3.
     (should (equal (llm-tool-name tool) "suggest-improvement"))
     ;; Async tools take a callback as the first argument.
     (funcall (llm-tool-function tool) #'ignore "suggestion one")
