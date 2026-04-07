@@ -81,6 +81,17 @@ snapshot.
 The agent can also use ~eval-elisp~ to query any programmatic state -- point
 position, variable values, overlays, text properties, etc.
 
+* Debugging
+
+To see what the agent is doing, set ~llm-test-debug~ or the
+~LLM_TEST_DEBUG~ environment variable:
+
+- ~t~ (or ~LLM_TEST_DEBUG=1~): Log tool calls and agent iterations to the
+  ~*Messages*~ buffer.
+- ~'file~ (or ~LLM_TEST_DEBUG=file~): Log detailed tool calls, results, and
+  the agent's full state at every turn to a temporary file.  The path
+  to the file will be printed at the start of the test.
+
 * YAML Test Format
 
 The YAML format consists of a single group with a shared setup and a list of tests.

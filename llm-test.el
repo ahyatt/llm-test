@@ -475,7 +475,7 @@ does not block the Emacs event loop."
 (defcustom llm-test-debug nil
   "When non-nil, log each tool call and its result.
 If set to t, logs to *Messages*.
-If set to 'file, logs to a temporary file and prints its location.
+If set to \\='file, logs to a temporary file and prints its location.
 If nil, check `llm-test-debug-environment-variable'."
   :type '(choice (const :tag "Off" nil)
                  (const :tag "Messages" t)
