@@ -628,7 +628,7 @@ The expression is evaluated in the context of the currently selected window's bu
                 (futur-bind
                  (llm-test--eval-in-emacs-async
                   emacs-info
-                  (format "(with-current-buffer (window-buffer (selected-window)) (insert %S) \"Text inserted\")" text))
+                  (format "(with-current-buffer (window-buffer (selected-window)) (execute-kbd-macro %S) \"Text inserted\")" text))
                  (lambda (result)
                    (funcall callback result)
                    (futur-done nil))
