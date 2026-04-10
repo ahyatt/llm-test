@@ -642,6 +642,38 @@ The expression is evaluated in the context of the currently selected window's bu
                       :description "The literal text to type.")))
 
    (make-llm-tool
+    :function (lambda (callback command)
+                (futur-bind
+                 (llm-test--eval-in-emacs-async
+                  emacs-info
+                  (format
+                   "(with-current-buffer (window-buffer (selected-window))
+                      (call-interactively '%s)
+                      \"Command executed\")"
+                   command))
+                 (lambda (result)
+                   (funcall callback result)
+                   (futur-done nil))
+                 (lambda (err)
+                   (funcall callback (format "ERROR: %s" err))
+                   (futur-done nil))))
+    :name "run-command"
+    :async t
+    :description "Run an Emacs interactive command by name in the currently
+selected window's buffer.  This is equivalent to the user typing
+`M-x COMMAND RET' but without going through the minibuffer.
+
+Use this when you know the exact command name — it is more reliable
+than typing it through `send-keys' with `M-x', since it avoids
+minibuffer completion issues and typos.
+
+If the command reads input from the minibuffer (e.g. a file name or
+search string), the minibuffer will become active after this call
+and you should answer it with `type-text' or `send-keys'."
+    :args (list (list :name "command" :type 'string
+                      :description "The Emacs command name (e.g. \"ekg-org-view\", \"save-buffer\").")))
+
+   (make-llm-tool
     :function (lambda (callback keys)
                 (futur-bind
                  (llm-test--eval-in-emacs-async
@@ -759,10 +791,14 @@ looking at the Emacs frame would see.
 Important rules:
 - Always call exactly one of pass-test or fail-test before finishing.
 - Use eval-elisp for programmatic operations and state inspection.
+- Use run-command to call an Emacs command by name (e.g. run-command \
+\"ekg-org-view\").  This is more reliable than typing \"M-x command-name RET\" \
+via send-keys and should be preferred when you know the command name.
 - Use type-text for typing strings of text (sentences, paragraphs) into the \
-buffer. This preserves spaces.
-- Use send-keys for simulated interactive input like M-x, RET, or command \
-keybindings. Note: literal spaces in send-keys are ignored; use 'SPC' if needed.
+buffer or minibuffer.  This preserves spaces and special characters.
+- Use send-keys for key sequences such as RET, TAB, C-c C-c, or single-key \
+commands.  Spaces between multi-character word tokens are preserved \
+automatically, but prefer type-text for longer text input.
 - send-keys is non-blocking: the keys may not be processed before the frame \
 state is captured.  Call eval-elisp with \"t\" if you need a fresh snapshot.
 - Do not batch send-keys across UI state transitions such as opening the \
