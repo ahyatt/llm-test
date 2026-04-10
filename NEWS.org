@@ -1,4 +1,5 @@
 * 0.2.3
+- Add =run-command= to avoid issues in using =M-x= directly.
 - Fix to properly handling reserved key names on input.
 - Fix for long outputs from emacsclient.
 * 0.2.2
