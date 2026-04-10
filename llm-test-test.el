@@ -419,10 +419,10 @@ function concatenates them into a single string."
 (ert-deftest llm-test-suggestions-accumulate ()
   "The suggest-improvement tool should accumulate suggestions."
   (let* ((suggestions (list nil))
-         (tool (nth 3 (llm-test--make-tools
+         (tool (nth 4 (llm-test--make-tools
                        '(:server-name "x" :socket-dir "/tmp")
                        suggestions))))
-    ;; The suggest-improvement tool is at index 3.
+    ;; The suggest-improvement tool is at index 4.
     (should (equal (llm-tool-name tool) "suggest-improvement"))
     ;; Async tools take a callback as the first argument.
     (funcall (llm-tool-function tool) #'ignore "suggestion one")
