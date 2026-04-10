@@ -2,6 +2,9 @@
 - Add =run-command= to avoid issues in using =M-x= directly.
 - Fix to properly handling reserved key names on input.
 - Fix for long outputs from emacsclient.
+- Add =sleep= tool.
+- Add navigation basics to instructions to agent knows how to do things.
+- Add indication of active window, and number the windows.
 * 0.2.2
 - Fixes to =type-text= to input the text more realistically.
 * 0.2.1

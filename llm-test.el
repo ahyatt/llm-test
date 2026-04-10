@@ -321,22 +321,30 @@ The YAML should contain a single group document with keys:
 (defun llm-test--capture-frame-state ()
   (redisplay t)
   (let* ((wins (window-list nil 'no-minibuf))
-         (windows (make-vector 0 nil)))
+         (windows (make-vector 0 nil))
+         (win-num 0)
+         (selected-win-num nil))
     (dolist (w wins)
       (let* ((buf (window-buffer w))
              (name (buffer-name buf)))
         (unless (string= name \"*Warnings*\")
+          (when (eq w (selected-window))
+            (setq selected-win-num win-num))
           (setq windows
                 (vconcat windows
                          (list
-                          (list :buffer name
+                          (list :number win-num
+                                :buffer name
                                 :mode (with-current-buffer buf (symbol-name major-mode))
-                                :selected (eq w (selected-window))
                                 :point (with-current-buffer buf (point))
-                                :lines (apply #'vector (llm-test--window-lines w)))))))))
+                                :lines (apply #'vector (llm-test--window-lines w))))))
+          (setq win-num (1+ win-num)))))
     (let ((mini-win (active-minibuffer-window)))
       (json-encode
-       (list :windows windows
+       (list :selected-window
+             (list :number selected-win-num
+                   :buffer (buffer-name (window-buffer (selected-window))))
+             :windows windows
              :minibuffer (if mini-win
                              (with-current-buffer (window-buffer mini-win)
                                (list :active t
@@ -846,6 +854,25 @@ prompt."
                       :description "Key sequence in Emacs notation.")))
 
    (make-llm-tool
+    :function (lambda (callback seconds)
+                (let ((secs (if (numberp seconds) seconds
+                              (string-to-number (format "%s" seconds)))))
+                  (run-at-time (max 0.1 (min secs 60)) nil
+                               (lambda ()
+                                 (funcall callback
+                                          (format "Slept %.1f seconds" secs))
+                                 (futur-done nil)))))
+    :name "sleep"
+    :async t
+    :description "Pause for the given number of seconds before returning.
+Use this when waiting for an asynchronous operation (e.g. an agent
+spawned by a command) to make progress.  The frame state in the
+response is captured AFTER the sleep, so it will reflect any changes
+that occurred during the wait.  Maximum 60 seconds per call."
+    :args (list (list :name "seconds" :type 'number
+                      :description "Number of seconds to sleep (max 60).")))
+
+   (make-llm-tool
     :function (lambda (callback suggestion)
                 (nconc suggestions (list suggestion))
                 (funcall callback
@@ -897,11 +924,12 @@ Every tool response includes a \"Frame state\" section at the end, which is a \
 JSON snapshot of the entire Emacs frame.  The JSON has this structure:
 
 {
+  \"selected-window\": {\"number\": <int>, \"buffer\": \"<buffer name>\"},
   \"windows\": [
     {
+      \"number\": <int>,
       \"buffer\": \"<buffer name>\",
       \"mode\": \"<major mode>\",
-      \"selected\": true/false,
       \"point\": <integer>,
       \"lines\": [\"<visual line 1>\", \"<visual line 2>\", ...]
     }
@@ -912,6 +940,12 @@ JSON snapshot of the entire Emacs frame.  The JSON has this structure:
     \"input\": \"<input so far>\"    // only when active
   }
 }
+
+The top-level \"selected-window\" tells you which window currently has focus \
+(by number and buffer name).  Any keys or commands you send will act on that \
+window.  If it is not the window you need, switch to the right one before \
+continuing (e.g. run-command \"switch-to-buffer\" or send-keys \"C-x b\").  \
+Note that the same buffer can appear in multiple windows.
 
 The window \"lines\" field is an array of strings, each representing a single \
 visual line on the screen.  If a long line of text is wrapped by Emacs \
@@ -939,6 +973,16 @@ action, refresh, then respond to what is visible.
 prompt appropriately: for read-string/completing-read style prompts, send the \
 input and RET; for single-key prompts such as y-or-n-p, send just the single \
 key.
+- Emacs navigation basics (use these via send-keys or run-command as needed):
+  * Switch to a buffer: run-command \"switch-to-buffer\" then type-text the \
+buffer name and send RET.  Or use send-keys with \"C-x b\" then the name \
+and RET.
+  * Switch windows: send-keys \"C-x o\" cycles between visible windows.
+  * Go to beginning/end of buffer: send-keys \"M-<\" or \"M->\".
+  * Move by line: send-keys \"C-n\" (next) or \"C-p\" (previous).
+  * Always check \"selected-window\" at the top of the frame state to know \
+which window has focus.  If a command opened a popup or result buffer that \
+stole focus, switch back to the buffer you need before continuing.
 - Trust the commands and keybindings named in the test description and setup. \
 Do not inspect keymaps, run describe-mode/describe-function, or open help \
 buffers unless the test explicitly asks for that or the instructed action has \
