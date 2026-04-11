@@ -342,7 +342,7 @@ The YAML should contain a single group document with keys:
                                    :mode (with-current-buffer buf (symbol-name major-mode))
                                    :point (with-current-buffer buf (point))
                                    :lines (apply #'vector (llm-test--window-lines w)))
-                             (when hdr (list :header-line hdr))))))))
+                             (when hdr (list :header-line hdr)))))))
           (setq win-num (1+ win-num)))))
     (let ((mini-win (active-minibuffer-window))
           (msg (current-message)))
