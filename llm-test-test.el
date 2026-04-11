@@ -410,23 +410,28 @@ function concatenates them into a single string."
       (llm-test--stop-emacs info))))
 
 (ert-deftest llm-test-selected-window-prefers-json-true ()
-  "Selected-window lookup should ignore JSON false values."
+  "Selected-window lookup should find the window matching selected-window number."
   (let* ((state (json-parse-string
-                 "{\"windows\":[{\"selected\":false,\"contents\":\"first\"},{\"selected\":true,\"contents\":\"second\"}]}"
+                 (concat "{\"selected-window\":{\"number\":1,\"buffer\":\"B\"},"
+                         "\"windows\":["
+                         "{\"number\":0,\"buffer\":\"A\",\"lines\":[\"first\"]},"
+                         "{\"number\":1,\"buffer\":\"B\",\"lines\":[\"second\"]}"
+                         "]}")
                  :object-type 'alist
                  :array-type 'list))
          (selected (llm-test-test--selected-window state)))
-    (should (equal (alist-get "contents" selected nil nil #'string=)
-                   "second"))))
+    (should (equal (alist-get "buffer" selected nil nil #'string=)
+                   "B"))))
 
 (ert-deftest llm-test-suggestions-accumulate ()
   "The suggest-improvement tool should accumulate suggestions."
   (let* ((suggestions (list nil))
-         (tool (nth 4 (llm-test--make-tools
-                       '(:server-name "x" :socket-dir "/tmp")
-                       suggestions))))
-    ;; The suggest-improvement tool is at index 4.
-    (should (equal (llm-tool-name tool) "suggest-improvement"))
+         (tools (llm-test--make-tools
+                 '(:server-name "x" :socket-dir "/tmp")
+                 suggestions))
+         (tool (seq-find (lambda (t) (equal (llm-tool-name t) "suggest-improvement"))
+                         tools)))
+    (should tool)
     ;; Async tools take a callback as the first argument.
     (funcall (llm-tool-function tool) #'ignore "suggestion one")
     (funcall (llm-tool-function tool) #'ignore "suggestion two")

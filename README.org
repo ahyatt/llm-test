@@ -37,6 +37,15 @@ On each iteration the agent may call any of these tools:
   ~M-x~, ~RET~) into the test Emacs as if typed by a user.  This is
   non-blocking: it schedules the keys via ~unread-command-events~ and returns
   immediately.
+- *type-text* -- Type literal text into the current buffer at point.  Use this
+  for entering sentences, paragraphs, or any strings where spaces and special
+  characters should be preserved exactly as-is.
+- *run-command* -- Run an Emacs interactive command by name (e.g.
+  ~run-command "save-buffer"~).  This is more reliable than typing ~M-x~ via
+  ~send-keys~ since it avoids minibuffer completion issues.
+- *sleep* -- Pause for a given number of seconds before returning.  Useful when
+  waiting for an asynchronous operation to make progress.  The frame state in the
+  response is captured after the sleep.  Maximum 60 seconds per call.
 - *suggest-improvement* -- Record a UI/UX suggestion about the package under
   test.  This does not affect the pass/fail verdict.
 - *pass-test* / *fail-test* -- Declare the test outcome and end the loop.
@@ -54,32 +63,44 @@ The frame state JSON has this structure:
 
 #+begin_src json
 {
+  "selected-window": {"number": 0, "buffer": "<buffer name>"},
   "windows": [
     {
+      "number": 0,
       "buffer": "<buffer name>",
       "mode": "<major mode>",
-      "selected": true,
       "point": 1,
-      "contents": "<visible text in window>"
+      "lines": ["<visual line 1>", "<visual line 2>"],
+      "header-line": "<header line text>"
     }
   ],
   "minibuffer": {
-    "active": false
-  }
+    "active": false,
+    "prompt": "<prompt text>",
+    "input": "<input so far>"
+  },
+  "message": "<echo area message>"
 }
 #+end_src
+
+The top-level ~selected-window~ indicates which window currently has focus (by
+number and buffer name).  Keys and commands act on this window.
+
+Each window's ~lines~ field is an array of strings representing the visible
+visual lines on screen (between ~window-start~ and ~window-end~), like a human
+looking at the Emacs frame.  If a long line is wrapped, it appears as multiple
+entries.  The ~header-line~ field is only present when the window has a header
+line (e.g. for column names or navigation breadcrumbs).
 
 When the minibuffer is active (e.g. after ~M-x~ or a ~completing-read~ prompt),
 the ~minibuffer~ object includes ~prompt~ and ~input~ fields showing the prompt
 text and any input entered so far.
 
-Each window's ~contents~ field contains only what is visible on screen (between
-~window-start~ and ~window-end~), like a human looking at the Emacs frame.  The
-agent can scroll with ~send-keys~ and then call any tool to get an updated
-snapshot.
+The ~message~ field contains the current echo-area message, if any.  Messages
+often contain hints such as available keybindings or status updates.
 
-The agent can also use ~eval-elisp~ to query any programmatic state -- point
-position, variable values, overlays, text properties, etc.
+The agent can also use ~eval-elisp~ to query any programmatic state -- variable
+values, overlays, text properties, etc.
 
 * Debugging
 
