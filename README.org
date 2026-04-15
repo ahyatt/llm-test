@@ -205,3 +205,11 @@ The provider is resolved when each test runs, in this order:
 * Status
 
 This project is in early development, and may go through significant changes, but it usable as-is.
+
+* Advice
+
+The quality of the model you run affects how detailed you have to be in the instructions.  Unless you put =llm-test= in an continuous integration, it probably is worth having a good model, such as Claude Sonnet.  However, even much cheaper models can do a good job, as long as the instructions are clear.
+
+Emacs workflows that involve very interactive elements are going to be difficult to test (but not impossible, hopefully).
+
+If you are doing agentic coding, I recommend writing these tests by hand.  They are essentially just prompts anyway, and agents often resort to instructing the agent to run elisp command, which isn't really in the spirit of testing in the way users are using emacs.
